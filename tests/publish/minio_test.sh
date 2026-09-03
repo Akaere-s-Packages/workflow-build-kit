@@ -50,7 +50,7 @@ case "$command" in
     if [[ "$target" == "." && "$source" == *"akaere.db.tar.gz" ]]; then
       increment downloads
       case "$mode" in
-        bootstrap|retention-retry) printf 'NoSuchKey\n' >&2; exit 1 ;;
+        bootstrap|retention-retry) printf 'mc: <ERROR> Unable to prepare URL for copying. Object does not exist\n' >&2; exit 1 ;;
         download-error) printf 'connection reset\n' >&2; exit 1 ;;
         inconsistent) exit 0 ;;
       esac
@@ -58,7 +58,7 @@ case "$command" in
     if [[ "$target" == "." && "$source" == *"akaere.files.tar.gz" ]]; then
       increment downloads
       case "$mode" in
-        bootstrap|retention-retry|inconsistent) printf 'NoSuchKey\n' >&2; exit 1 ;;
+        bootstrap|retention-retry|inconsistent) printf 'mc: <ERROR> Unable to prepare URL for copying. Object does not exist\n' >&2; exit 1 ;;
         download-error) printf 'connection reset\n' >&2; exit 1 ;;
       esac
     fi

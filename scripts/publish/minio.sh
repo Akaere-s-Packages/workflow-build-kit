@@ -57,10 +57,21 @@ retry() {
     n=$((n + 1))
   done
 }
-# Downloads a repository metadata object, retrying failures other than an
-# explicit S3 NoSuchKey response. A missing object is valid only when both
+# Downloads a repository metadata object, retrying failures other than a
+# missing-object response. A missing object is valid only when both
 # metadata files are absent on the first-ever publish; callers distinguish it
 # with status 2 instead of silently treating every R2 error as missing.
+#
+# mc's actual wording for a missing key against a real Cloudflare R2 bucket
+# is "Object does not exist" — NOT the raw S3 error code "NoSuchKey" that
+# an earlier version of this check assumed (and that the test suite's fake
+# `mc` stub had been echoing verbatim, so the test passed while the real
+# thing didn't: a bootstrap publish against a genuinely-empty repo retried
+# 3 times and hard-failed instead of proceeding to create the initial db).
+# Matching "Object does not exist" specifically (not a broader "does not
+# exist") matters: a *bucket*-level 404 ("The specified bucket does not
+# exist") is a real misconfiguration — wrong R2_BUCKET — and must still
+# fail loudly, not get silently treated as "first publish, going ahead".
 download_metadata_file() {
   local source="$1" destination="$2"
   local attempts=3 delay=5 n=1 output
@@ -69,7 +80,7 @@ download_metadata_file() {
     if output="$(mc cp "$source" "$destination" 2>&1)"; then
       return 0
     fi
-    if [[ "$output" == *"NoSuchKey"* ]]; then
+    if [[ "$output" == *"NoSuchKey"* || "$output" == *"Object does not exist"* ]]; then
       echo "repository metadata is absent: $source" >&2
       return 2
     fi
