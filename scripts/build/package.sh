@@ -82,7 +82,12 @@ build_one() {
   # requires it to be kept in sync with the PKGBUILD).
   local skip_pgp_check=""
   local keys
-  keys="$(grep -oP '(?<=validpgpkeys = )[0-9A-Fa-f]+' "$dir/.SRCINFO" 2>/dev/null | tr '\n' ' ')"
+  # `|| true` is load-bearing, not decoration: grep exits 1 when a package
+  # (the common case — most PKGBUILDs don't declare validpgpkeys at all)
+  # has no matches, and with `pipefail` + `set -e` that would otherwise
+  # kill this whole script on a plain assignment, even though "no keys
+  # needed" is the expected, successful outcome here, not an error.
+  keys="$(grep -oP '(?<=validpgpkeys = )[0-9A-Fa-f]+' "$dir/.SRCINFO" 2>/dev/null | tr '\n' ' ' || true)"
   if [[ -n "$keys" ]]; then
     local imported=false
     for ks in keyserver.ubuntu.com keys.openpgp.org pgp.mit.edu; do
