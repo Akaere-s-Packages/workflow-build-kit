@@ -118,23 +118,38 @@ build_one() {
 }
 
 # The file makepkg actually produces for one pkgname of a (possibly split)
-# build: <pkgname>-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst, taken straight from
-# .SRCINFO's pkgbase-level pkgver/pkgrel rather than guessed. A plain
-# "${pkgname}-"* glob is NOT safe to pick this out on its own: makepkg's
-# automatic debug-package feature (active by default whenever the built
-# binaries have unstripped symbols — no PKGBUILD opt-in needed) adds an
-# extra <pkgname>-debug-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst file that also
-# matches "${pkgname}-"*, and isn't listed anywhere in the PKGBUILD/.SRCINFO
-# pkgname array to filter out by name. This bit asusctl for real once its
-# build started producing unstripped binaries: the glob matched both
-# asusctl-6.4.0-1-x86_64.pkg.tar.zst and asusctl-debug-6.4.0-1-x86_64.pkg.tar.zst.
+# build: <pkgname>-[<epoch>:]<pkgver>-<pkgrel>-<arch>.pkg.tar.zst, taken
+# straight from .SRCINFO's pkgbase-level fields rather than guessed. A
+# plain "${pkgname}-"* glob is NOT safe to pick this out on its own:
+# makepkg's automatic debug-package feature (active by default whenever the
+# built binaries have unstripped symbols — no PKGBUILD opt-in needed) adds
+# an extra <pkgname>-debug-... file that also matches "${pkgname}-"*, and
+# isn't listed anywhere in the PKGBUILD/.SRCINFO pkgname array to filter
+# out by name. This bit asusctl for real once its build started producing
+# unstripped binaries: the glob matched both asusctl-6.4.0-1-x86_64.pkg.tar.zst
+# and asusctl-debug-6.4.0-1-x86_64.pkg.tar.zst.
+#
+# Two more real, since-fixed wrong assumptions from an earlier version of
+# this function, both caught by noto-fonts-sc actually building: epoch IS
+# part of the filename when the PKGBUILD sets one (makepkg names it
+# noto-fonts-sc-2:20210430-2-any.pkg.tar.zst, not .../20210430-2-...) even
+# though it's dropped from `pacman -Q` display — and arch isn't always
+# x86_64; an arch=(any) package (most font/data-only packages) produces
+# .../<pkgrel>-any.pkg.tar.zst, and hardcoding x86_64 here made this exact
+# "found 0, expected 1" the same way the debug-package glob mismatch did.
 expected_package_file() {
   local base="$1" pkgname="$2"
   local srcinfo="$work_dir/$base/.SRCINFO"
-  local pkgver pkgrel
+  local pkgver pkgrel epoch arch version_component
   pkgver="$(grep -m1 -oP '(?<=pkgver = ).+' "$srcinfo")"
   pkgrel="$(grep -m1 -oP '(?<=pkgrel = ).+' "$srcinfo")"
-  echo "$work_dir/$base/${pkgname}-${pkgver}-${pkgrel}-x86_64.pkg.tar.zst"
+  arch="$(grep -m1 -oP '(?<=arch = ).+' "$srcinfo")"
+  # epoch is genuinely optional (most PKGBUILDs never set one) — `|| true`
+  # is load-bearing here exactly like the validpgpkeys lookup above: grep's
+  # "no match" exit code is the expected, common outcome, not an error.
+  epoch="$(grep -m1 -oP '(?<=epoch = ).+' "$srcinfo" || true)"
+  version_component="${epoch:+${epoch}:}${pkgver}"
+  echo "$work_dir/$base/${pkgname}-${version_component}-${pkgrel}-${arch}.pkg.tar.zst"
 }
 
 # Chained AUR-only dependencies must be built and installed into the

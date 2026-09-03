@@ -66,8 +66,12 @@ for dir in artifacts/build-*/; do
   if [[ "$outcome" == "built" ]]; then
     # Safe as a plain glob (unlike build/package.sh's own selection logic):
     # package.sh already narrowed $dir down to exactly the one file this
-    # Registry entry tracks before it ever became this artifact.
-    pkg_file=$(find "$dir" -maxdepth 1 -name "${name}-*-x86_64.pkg.tar.zst" | head -n1)
+    # Registry entry tracks before it ever became this artifact — no other
+    # package's files ever land in the same directory, so there's nothing
+    # else here for the glob to accidentally match. Not anchored to
+    # -x86_64.pkg.tar.zst specifically: an arch=(any) package (fonts,
+    # pure-data packages) produces .../<pkgrel>-any.pkg.tar.zst instead.
+    pkg_file=$(find "$dir" -maxdepth 1 -name "${name}-*.pkg.tar.zst" | head -n1)
     if [[ -n "$pkg_file" ]] && DISTRO="$distro" bash build-kit/scripts/publish/minio.sh "$name" "$pkg_file"; then
       status="published"
     else

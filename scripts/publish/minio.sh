@@ -182,15 +182,36 @@ echo "published $pkg_basename"
 # below) rather than the whole publish failing — the package we just
 # published is already safely up, and the next successful run will catch
 # up on retention. Still worth a retry first since it's cheap.
+#
+# The filter below requires *exactly* three more hyphen-free tokens after
+# "$name-" — [epoch:]pkgver, pkgrel, and arch — rather than the old
+# `.+-x86_64` glob. Two real reasons, not just tidiness:
+#   1. arch isn't always x86_64 — an arch=(any) package (fonts, pure-data
+#      packages: noto-fonts-sc is one right now) produces .../<pkgrel>-any.pkg.tar.zst,
+#      which the old hardcoded suffix simply never matched, silently
+#      disabling retention for every such package.
+#   2. `.+` is greedy enough to also match a DIFFERENT, longer package's
+#      files whenever one tracked name is a literal prefix of another —
+#      samsung-unified-driver-{common,printer,scanner} are exactly that
+#      relative to samsung-unified-driver. Since pkgver/pkgrel/arch can
+#      never themselves contain a hyphen (only [epoch:]pkgver can contain a
+#      colon), requiring exactly three hyphen-free trailing tokens is enough
+#      to reject "samsung-unified-driver-common-1.00.39-11-x86_64..." when
+#      pruning plain "samsung-unified-driver" (that remainder splits into
+#      four tokens, not three) — the old pattern would have quietly treated
+#      one package's files as another's stale versions and deleted them.
 list_versions() { mc ls "$remote/"; }
-existing="$(retry list_versions | awk '{print $NF}' | grep -E "^${name}-.+-x86_64\.pkg\.tar\.zst$" || true)"
+existing="$(retry list_versions | awk '{print $NF}' | grep -E "^${name}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$" || true)"
 
 versions=()
+declare -A file_for_version=()
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  v="${f#"${name}"-}"
-  v="${v%-x86_64.pkg.tar.zst}"
-  versions+=("$v")
+  if [[ "$f" =~ ^${name}-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]]; then
+    v="${BASH_REMATCH[1]}"
+    versions+=("$v")
+    file_for_version["$v"]="$f"
+  fi
 done <<< "$existing"
 
 # Insertion-sort descending by vercmp (newest first). Small N, O(n^2) is fine.
@@ -208,7 +229,7 @@ for v in "${versions[@]}"; do
 done
 
 for v in "${sorted[@]:$keep_versions}"; do
-  stale="${name}-${v}-x86_64.pkg.tar.zst"
+  stale="${file_for_version[$v]}"
   echo "pruning old version: $stale"
   if ! retry mc rm "$remote/$stale" "$remote/${stale}.sig"; then
     echo "::warning::could not prune $stale; retention will retry on the next publish" >&2
