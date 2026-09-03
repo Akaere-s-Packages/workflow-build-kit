@@ -57,6 +57,65 @@ retry() {
     n=$((n + 1))
   done
 }
+# Downloads a repository metadata object, retrying failures other than an
+# explicit S3 NoSuchKey response. A missing object is valid only when both
+# metadata files are absent on the first-ever publish; callers distinguish it
+# with status 2 instead of silently treating every R2 error as missing.
+download_metadata_file() {
+  local source="$1" destination="$2"
+  local attempts=3 delay=5 n=1 output
+
+  while true; do
+    if output="$(mc cp "$source" "$destination" 2>&1)"; then
+      return 0
+    fi
+    if [[ "$output" == *"NoSuchKey"* ]]; then
+      echo "repository metadata is absent: $source" >&2
+      return 2
+    fi
+    echo "$output" >&2
+    if (( n >= attempts )); then
+      echo "::error::metadata download failed after $attempts attempts: $source" >&2
+      return 1
+    fi
+    echo "::warning::metadata download failed (attempt $n/$attempts), retrying in ${delay}s: $source" >&2
+    sleep "$delay"
+    n=$((n + 1))
+  done
+}
+
+download_metadata_pair() {
+  local db_state files_state status
+
+  if download_metadata_file "$remote/$db_file" .; then
+    db_state=present
+  else
+    status=$?
+    case "$status" in
+      2) db_state=missing ;;
+      *) return "$status" ;;
+    esac
+  fi
+
+  if download_metadata_file "$remote/$files_file" .; then
+    files_state=present
+  else
+    status=$?
+    case "$status" in
+      2) files_state=missing ;;
+      *) return "$status" ;;
+    esac
+  fi
+
+  if [[ "$db_state" != "$files_state" ]]; then
+    echo "::error::incomplete remote repository metadata: $db_file is $db_state, $files_file is $files_state" >&2
+    return 1
+  fi
+  if [[ "$db_state" == missing ]]; then
+    echo "repository metadata is absent; creating the initial repository" >&2
+  fi
+}
+
 
 set +x  # never trace the credentials themselves
 mc alias set "$alias_name" "${R2_ENDPOINT:?}" "${R2_ACCESS_KEY_ID:?}" "${R2_SECRET_ACCESS_KEY:?}" >/dev/null
@@ -69,9 +128,10 @@ cd "$work_dir"
 db_file="${repo_name}.db.tar.gz"
 files_file="${repo_name}.files.tar.gz"
 
-# Absent on the very first-ever publish; that's fine, repo-add creates it.
-mc cp "$remote/$db_file" . 2>/dev/null || true
-mc cp "$remote/$files_file" . 2>/dev/null || true
+# An empty repository has neither metadata object. Anything else — including
+# a transient R2 failure, bad credentials, or only one object being absent —
+# must stop before repo-add could overwrite the existing package index.
+download_metadata_pair
 
 cp "$pkg_file" .
 pkg_basename="$(basename "$pkg_file")"
@@ -139,5 +199,7 @@ done
 for v in "${sorted[@]:$keep_versions}"; do
   stale="${name}-${v}-x86_64.pkg.tar.zst"
   echo "pruning old version: $stale"
-  mc rm "$remote/$stale" "$remote/${stale}.sig" 2>/dev/null || true
+  if ! retry mc rm "$remote/$stale" "$remote/${stale}.sig"; then
+    echo "::warning::could not prune $stale; retention will retry on the next publish" >&2
+  fi
 done

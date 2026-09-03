@@ -62,7 +62,10 @@ jobs:
           python3 .build-kit/scripts/registry/resolve_build_order.py \
             --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved packages:"; cat layers.json
-          echo "packages=$(jq -c 'add' layers.json)" >> "$GITHUB_OUTPUT"
+          # Bare assignment so a genuine jq failure trips `set -e` instead
+          # of silently writing an empty list to $GITHUB_OUTPUT.
+          packages=$(jq -c 'add' layers.json)
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
 
   build:
     needs: detect-and-validate
@@ -88,17 +91,24 @@ jobs:
           path: registry-base
       - id: meta
         run: |
-          {
-            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
-            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
-            echo "new_version=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES']['version'])")"
-            echo "old_version=$(python3 -c "
+          # Bare assignments first, *then* echo them — see build-publish.yml's
+          # equivalent step for why `echo "key=$(...)"` directly doesn't
+          # trip `set -e` on a genuine failure the way a plain assignment does.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          new_version=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES']['version'])")
+          old_version=$(python3 -c "
           import tomllib
           try:
               print(tomllib.load(open('registry-base/${{ matrix.path }}','rb'))['PACKAGES']['version'])
           except FileNotFoundError:
               print('')
-          ")"
+          ")
+          {
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
+            echo "new_version=$new_version"
+            echo "old_version=$old_version"
           } >> "$GITHUB_OUTPUT"
       - name: build (inside archlinux:base-devel)
         id: build

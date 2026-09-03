@@ -91,9 +91,17 @@ jobs:
           python3 .build-kit/scripts/registry/resolve_build_order.py \
             --registry-root . --changed changed.json > layers.json
           echo "resolved build layers:"; cat layers.json
-          echo "layer0=$(jq -c '.[0]' layers.json)" >> "$GITHUB_OUTPUT"
-          echo "layer1=$(jq -c '.[1]' layers.json)" >> "$GITHUB_OUTPUT"
-          echo "layer2=$(jq -c '.[2]' layers.json)" >> "$GITHUB_OUTPUT"
+          # Bare assignments (not `echo "x=$(...)"`) so a genuine jq
+          # failure trips `set -e` instead of silently writing an empty
+          # layer to $GITHUB_OUTPUT.
+          layer0=$(jq -c '.[0]' layers.json)
+          layer1=$(jq -c '.[1]' layers.json)
+          layer2=$(jq -c '.[2]' layers.json)
+          {
+            echo "layer0=$layer0"
+            echo "layer1=$layer1"
+            echo "layer2=$layer2"
+          } >> "$GITHUB_OUTPUT"
 
   build-wave-0:
     needs: detect-changes
@@ -121,9 +129,16 @@ jobs:
           path: build-kit
       - id: meta
         run: |
+          # Assign to plain variables first, *then* echo them — a command
+          # substitution that fails inside `echo "key=$(...)"` directly
+          # does NOT trip `set -e` (echo itself still "succeeds"), so a
+          # genuine parse failure would otherwise be silently swallowed
+          # into an empty value instead of failing this step loudly.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
           {
-            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
-            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
       - name: build (inside archlinux:base-devel)
         id: build
@@ -183,9 +198,16 @@ jobs:
           path: build-kit
       - id: meta
         run: |
+          # Assign to plain variables first, *then* echo them — a command
+          # substitution that fails inside `echo "key=$(...)"` directly
+          # does NOT trip `set -e` (echo itself still "succeeds"), so a
+          # genuine parse failure would otherwise be silently swallowed
+          # into an empty value instead of failing this step loudly.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
           {
-            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
-            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
       - name: build (inside archlinux:base-devel)
         id: build
@@ -246,9 +268,16 @@ jobs:
           path: build-kit
       - id: meta
         run: |
+          # Assign to plain variables first, *then* echo them — a command
+          # substitution that fails inside `echo "key=$(...)"` directly
+          # does NOT trip `set -e` (echo itself still "succeeds"), so a
+          # genuine parse failure would otherwise be silently swallowed
+          # into an empty value instead of failing this step loudly.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
           {
-            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
-            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
       - name: build (inside archlinux:base-devel)
         id: build
@@ -301,6 +330,12 @@ jobs:
         needs.detect-changes.outputs.layer2 != '[]'
       )
     runs-on: ubuntu-latest
+    # repo-add performs a read-modify-write of the shared R2 repository DB.
+    # Serializing only this job keeps independent build waves parallel while
+    # preventing a later uploader from overwriting another run's DB update.
+    concurrency:
+      group: akaere-r2-pacman-repository
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
