@@ -117,29 +117,53 @@ build_one() {
   retry su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
+# The file makepkg actually produces for one pkgname of a (possibly split)
+# build: <pkgname>-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst, taken straight from
+# .SRCINFO's pkgbase-level pkgver/pkgrel rather than guessed. A plain
+# "${pkgname}-"* glob is NOT safe to pick this out on its own: makepkg's
+# automatic debug-package feature (active by default whenever the built
+# binaries have unstripped symbols — no PKGBUILD opt-in needed) adds an
+# extra <pkgname>-debug-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst file that also
+# matches "${pkgname}-"*, and isn't listed anywhere in the PKGBUILD/.SRCINFO
+# pkgname array to filter out by name. This bit asusctl for real once its
+# build started producing unstripped binaries: the glob matched both
+# asusctl-6.4.0-1-x86_64.pkg.tar.zst and asusctl-debug-6.4.0-1-x86_64.pkg.tar.zst.
+expected_package_file() {
+  local base="$1" pkgname="$2"
+  local srcinfo="$work_dir/$base/.SRCINFO"
+  local pkgver pkgrel
+  pkgver="$(grep -m1 -oP '(?<=pkgver = ).+' "$srcinfo")"
+  pkgrel="$(grep -m1 -oP '(?<=pkgrel = ).+' "$srcinfo")"
+  echo "$work_dir/$base/${pkgname}-${pkgver}-${pkgrel}-x86_64.pkg.tar.zst"
+}
+
 # Chained AUR-only dependencies must be built and installed into the
 # container first — makepkg --syncdeps only knows how to pull from pacman
 # sync repos, not from AUR.
 for dep in "${aur_depends[@]:-}"; do
   [[ -z "$dep" ]] && continue
   build_one "$dep"
-  dep_pkg=$(find "$work_dir/$dep" -maxdepth 1 -name "${dep}-"*-x86_64.pkg.tar.zst | head -n1)
+  dep_pkg="$(expected_package_file "$dep" "$dep")"
+  if [[ ! -f "$dep_pkg" ]]; then
+    echo "expected built dependency package '$dep_pkg' not found" >&2
+    ls -la "$work_dir/$dep" >&2 || true
+    exit 1
+  fi
   su - builder -c "sudo pacman -U --noconfirm '$dep_pkg'"
 done
 
 build_one "$pkgbase"
 
-# A PKGBUILD can produce more than one pkgname; this Registry entry only
-# tracks (and keeps) the one named $name — the rest of makepkg's output
-# for this build gets discarded along with the whole container.
-shopt -s nullglob
-matches=("$work_dir/$pkgbase/${name}-"*-x86_64.pkg.tar.zst)
-shopt -u nullglob
-if [[ ${#matches[@]} -ne 1 ]]; then
-  echo "expected exactly one built package matching '${name}-*-x86_64.pkg.tar.zst' in $work_dir/$pkgbase, found ${#matches[@]}" >&2
+# This Registry entry only tracks (and keeps) the one pkgname named $name;
+# the rest of makepkg's output for this build (sibling split packages,
+# any auto-generated -debug package) gets discarded along with the whole
+# container.
+pkg_file="$(expected_package_file "$pkgbase" "$name")"
+if [[ ! -f "$pkg_file" ]]; then
+  echo "expected built package '$pkg_file' not found" >&2
+  ls -la "$work_dir/$pkgbase" >&2 || true
   exit 1
 fi
-pkg_file="${matches[0]}"
 cp "$pkg_file" "$out_dir/"
 
 # --- file list + total size, excluding directories and pacman's own
