@@ -18,15 +18,10 @@ import pathlib
 import subprocess
 import sys
 import urllib.error
-import urllib.parse
-import urllib.request
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "registry"))
+import aur_graph  # noqa: E402
 
-AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
 BASE_BRANCH = "main"
 
 
@@ -34,101 +29,8 @@ def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(args, check=check, capture_output=True, text=True)
 
 
-def load_registry(root: pathlib.Path) -> list[dict]:
-    # Layout: <distro>/<type>/<name>/<name>.toml (e.g. archlinux/aur/asusctl/asusctl.toml).
-    entries = []
-    for toml_path in sorted(root.glob("*/*/*/*.toml")):
-        distro, source_type, dirname, filename = toml_path.parts[-4:]
-        if filename != f"{dirname}.toml":
-            continue
-        table = tomllib.loads(toml_path.read_text())["PACKAGES"]
-        entries.append(
-            {
-                "distro": distro,
-                "type": source_type,
-                "name": table["name"],
-                "pkgbase": table.get("pkgbase", table["name"]),
-                "version": table["version"],
-                "autoupdate": bool(table.get("autoupdate", False)),
-                "enabled": bool(table.get("enabled", True)),
-                "toml_path": toml_path,
-            }
-        )
-    return entries
-
-
-def fetch_aur_info(pkgbases: list[str]) -> dict[str, dict]:
-    if not pkgbases:
-        return {}
-    qs = "&".join("arg[]=" + urllib.parse.quote(b) for b in sorted(set(pkgbases)))
-    with urllib.request.urlopen(f"{AUR_RPC}?{qs}", timeout=30) as resp:
-        data = json.load(resp)
-    return {r["Name"]: r for r in data.get("results", [])}
-
-
-def strip_version_constraint(dep: str) -> str:
-    for sep in (">=", "<=", "=", ">", "<"):
-        dep = dep.split(sep, 1)[0]
-    return dep
-
-
-def dep_names(info: dict) -> set[str]:
-    # Only hard Depends/MakeDepends count as a real "A depends on B"
-    # relationship for grouping purposes — OptDepends is a soft suggestion,
-    # not a requirement, and bundling PRs over one would be overreach.
-    names = set()
-    for field in ("Depends", "MakeDepends"):
-        for dep in info.get(field) or []:
-            names.add(strip_version_constraint(dep))
-    return names
-
-
-def connected_components(nodes: set[str], edges: dict[str, set[str]]) -> list[set[str]]:
-    seen: set[str] = set()
-    components = []
-    for start in nodes:
-        if start in seen:
-            continue
-        stack = [start]
-        component: set[str] = set()
-        while stack:
-            n = stack.pop()
-            if n in component:
-                continue
-            component.add(n)
-            neighbors = edges.get(n, set()) | {m for m, es in edges.items() if n in es}
-            stack.extend(neighbors - component)
-        seen |= component
-        components.append(component)
-    return components
-
-
-def topo_order(names: set[str], depends_on: dict[str, set[str]]) -> list[str]:
-    """Dependencies first (post-order DFS). Tolerates cycles — real
-    packages shouldn't have any, but PKGBUILDs are user-authored data we
-    don't control, so a cycle degrades to visiting nodes in whatever order
-    the guard lets it, rather than crashing."""
-    order: list[str] = []
-    visited: set[str] = set()
-    in_progress: set[str] = set()
-
-    def visit(n: str) -> None:
-        if n in visited or n in in_progress:
-            return
-        in_progress.add(n)
-        for dep in sorted(depends_on.get(n, set()) & names):
-            visit(dep)
-        in_progress.discard(n)
-        visited.add(n)
-        order.append(n)
-
-    for n in sorted(names):
-        visit(n)
-    return order
-
-
 def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str, set[str]]) -> None:
-    ordered = topo_order(group, depends_on)
+    ordered = aur_graph.topo_order(group, depends_on)
     branch = "bump/" + "+".join(ordered)
 
     exists = run("git", "ls-remote", "--exit-code", "--heads", "origin", branch, check=False)
@@ -186,7 +88,7 @@ def main() -> int:
     ap.add_argument("--registry-root", required=True, type=pathlib.Path)
     args = ap.parse_args()
 
-    entries = load_registry(args.registry_root)
+    entries = aur_graph.load_registry(args.registry_root)
     candidates = [e for e in entries if e["autoupdate"] and e["enabled"]]
 
     if not candidates:
@@ -194,7 +96,7 @@ def main() -> int:
         return 0
 
     try:
-        aur_info = fetch_aur_info([e["pkgbase"] for e in candidates])
+        aur_info = aur_graph.fetch_aur_info([e["pkgbase"] for e in candidates])
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"::error::AUR RPC lookup failed: {exc}", file=sys.stderr)
         return 1
@@ -213,10 +115,10 @@ def main() -> int:
         print("all autoupdate packages are already up to date")
         return 0
 
-    depends_on = {name: dep_names(d["info"]) & dirty.keys() for name, d in dirty.items()}
-    edges = {name: deps for name, deps in depends_on.items() if deps}
+    dirty_entries = [d["entry"] for d in dirty.values()]
+    depends_on = aur_graph.build_graph(dirty_entries, aur_info)
 
-    for group in connected_components(set(dirty), edges):
+    for group in aur_graph.connected_components(set(dirty), depends_on):
         process_group(group, dirty, depends_on)
 
     return 0

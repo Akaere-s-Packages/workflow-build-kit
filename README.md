@@ -77,12 +77,22 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `registry/detect_changed_packages.sh` | Which `<distro>/<type>/<name>/<name>.toml` changed between two git refs |
 | `registry/validate_schema.py` | Validate a toml against the package schema |
 | `registry/update_readme.py` | Regenerate the package table in Registry/README.md |
+| `registry/aur_graph.py` | Shared dependency-graph helpers (batched AUR RPC fetch, hard-Depends/MakeDepends graph, connected components, topological/layered ordering) — imported by both `aur/check_updates.py` and `registry/resolve_build_order.py`, not run standalone |
+| `registry/resolve_build_order.py` | Expand a changed-package set to everything hard-dependent on it, laid out in up to N dependency-ordered build layers |
 | `aur/check_version.sh` | Look up one pkgbase's latest version on AUR |
 | `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open PRs |
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
 | `publish/minio.sh` | GPG-sign, `repo-add`, upload to R2, prune files beyond the newest 3 versions |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |
 | `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment |
+
+### Build ordering
+
+`build-publish.yml` doesn't just build the packages that literally changed — `resolve_build_order.py` expands that set to every Registry package hard-dependent on one of them (e.g. bumping `asusctl` also rebuilds `rog-control-center`, since it `Depends` on asusctl), then lays the whole set out into up to 3 layers ("waves"): layer 0 has no unbuilt dependency within the set, layer 1 depends only on layer 0, etc. Only hard `Depends`/`MakeDepends` count — `OptDepends` is a soft suggestion, not something worth rebuilding over.
+
+Each wave is its own job (`build-wave-0`/`1`/`2`), matrixed in parallel internally, `needs:`-chained so wave 1 only starts once wave 0 has fully finished (regardless of whether wave 0 itself was skipped for being empty — see the `always()` guards in the job `if:` conditions). 3 layers is a deliberate, documented cap: `resolve_build_order.py` errors loudly if the real dependency graph among tracked packages ever needs more than that, rather than silently building out of order.
+
+`pr-preview.yml` does the same expansion but flattens all layers into one parallel matrix — build order doesn't matter there (nothing depends on `makepkg` running in a particular sequence for a preview build), only "build everything related" does.
 
 ## Known simplifications
 

@@ -34,7 +34,7 @@ jobs:
   detect-and-validate:
     runs-on: ubuntu-latest
     outputs:
-      packages: ${{ steps.detect.outputs.packages }}
+      packages: ${{ steps.resolve.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,13 +46,23 @@ jobs:
           path: .build-kit
       - id: detect
         run: |
-          packages=$(.build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}")
-          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+          echo "changed packages:"; cat changed.json
       - name: validate schema
-        if: steps.detect.outputs.packages != '[]'
         run: |
-          paths=$(echo '${{ steps.detect.outputs.packages }}' | python3 -c "import json,sys; print(' '.join(p['path'] for p in json.load(sys.stdin)))")
-          python3 .build-kit/scripts/registry/validate_schema.py $paths
+          paths=$(python3 -c "import json; print(' '.join(p['path'] for p in json.load(open('changed.json'))))")
+          [[ -n "$paths" ]] && python3 .build-kit/scripts/registry/validate_schema.py $paths || echo "nothing to validate"
+      - id: resolve
+        run: |
+          # Expand to everything hard-dependent on what changed (e.g. a PR
+          # touching only asusctl also previews rog-control-center, since
+          # it depends on it) — order doesn't matter for the preview build
+          # (nothing here needs makepkg-time ordering), so flatten straight
+          # into one list for a single parallel matrix.
+          python3 .build-kit/scripts/registry/resolve_build_order.py \
+            --registry-root . --changed changed.json --max-layers 5 > layers.json
+          echo "resolved packages:"; cat layers.json
+          echo "packages=$(jq -c 'add' layers.json)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: detect-and-validate

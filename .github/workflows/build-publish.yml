@@ -1,10 +1,11 @@
 name: build-publish
 
 # Called by Registry's own push-to-main workflow after a PR merges. Builds
-# every changed package, GPG-signs and publishes the successful ones to
-# the R2-backed pacman repo, refreshes WebSite-Kit's data, updates
-# Registry/README.md, and opens/closes per-package failure Issues on
-# Registry.
+# every changed package (plus anything hard-dependent on it, in dependency
+# order — see scripts/registry/resolve_build_order.py), GPG-signs and
+# publishes the successful ones to the R2-backed pacman repo, refreshes
+# WebSite-Kit's data, updates Registry/README.md, and opens/closes
+# per-package failure Issues on Registry.
 #
 # Internal checkouts of this repo (workflow-build-kit) are pinned to
 # `main` for simplicity; move to a tagged release once this is stable.
@@ -48,7 +49,9 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      packages: ${{ steps.detect.outputs.packages }}
+      layer0: ${{ steps.resolve.outputs.layer0 }}
+      layer1: ${{ steps.resolve.outputs.layer1 }}
+      layer2: ${{ steps.resolve.outputs.layer2 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,13 +63,26 @@ jobs:
           path: .build-kit
       - id: detect
         run: |
-          packages=$(.build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}")
-          echo "packages=$packages" >> "$GITHUB_OUTPUT"
-          echo "changed packages: $packages"
+          .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+          echo "changed packages:"; cat changed.json
+      - id: resolve
+        run: |
+          # Expands the literally-changed set to everything hard-dependent
+          # on it (e.g. bumping asusctl also pulls in rog-control-center,
+          # which depends on it) and lays the result out in up to 3
+          # dependency-ordered build layers ("waves"). Padded to exactly 3
+          # entries by resolve_build_order.py, so layer0/1/2 are always
+          # valid — no need to guard against a shorter array.
+          python3 .build-kit/scripts/registry/resolve_build_order.py \
+            --registry-root . --changed changed.json > layers.json
+          echo "resolved build layers:"; cat layers.json
+          echo "layer0=$(jq -c '.[0]' layers.json)" >> "$GITHUB_OUTPUT"
+          echo "layer1=$(jq -c '.[1]' layers.json)" >> "$GITHUB_OUTPUT"
+          echo "layer2=$(jq -c '.[2]' layers.json)" >> "$GITHUB_OUTPUT"
 
-  build:
+  build-wave-0:
     needs: detect-changes
-    if: needs.detect-changes.outputs.packages != '[]'
+    if: needs.detect-changes.outputs.layer0 != '[]'
     runs-on: ubuntu-latest
     # Deliberately NOT `container: archlinux:base-devel` at the job level:
     # actions/checkout needs a real `git` binary, and the base-devel group
@@ -78,7 +94,132 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
+        include: ${{ fromJSON(needs.detect-changes.outputs.layer0) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - id: meta
+        run: |
+          {
+            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
+            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: write manifest
+        if: always()
+        run: |
+          status="build_failed"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="built"
+          cat > out/manifest.json <<EOF
+          {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  build-wave-1:
+    needs: [detect-changes, build-wave-0]
+    # `always()` overrides the default "skip if a needed job was skipped"
+    # behavior — build-wave-0 is legitimately skipped whenever layer0 is
+    # empty, and that must not skip this wave too.
+    if: always() && needs.detect-changes.outputs.layer1 != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-changes.outputs.layer1) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - id: meta
+        run: |
+          {
+            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
+            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: write manifest
+        if: always()
+        run: |
+          status="build_failed"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="built"
+          cat > out/manifest.json <<EOF
+          {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  build-wave-2:
+    # Only needs build-wave-1 directly — GitHub still enforces the full
+    # chain transitively (build-wave-1 already needs build-wave-0), so
+    # this correctly starts after both earlier waves regardless of
+    # whether either was skipped.
+    needs: [detect-changes, build-wave-1]
+    if: always() && needs.detect-changes.outputs.layer2 != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-changes.outputs.layer2) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,12 +272,19 @@ jobs:
           if-no-files-found: warn
 
   publish:
-    # No `always()` needed: an individual package's build step uses
-    # continue-on-error, so the `build` job itself still reports success
-    # even when some matrix legs failed to build — that's what lets
-    # publish run and correctly mark just those packages publish_failed.
-    needs: [detect-changes, build]
-    if: needs.detect-changes.outputs.packages != '[]'
+    # No `always()` needed on the build-wave-* dependency itself: an
+    # individual package's build step uses continue-on-error, so each wave
+    # job still reports success even when some of its matrix legs failed
+    # to build — that's what lets publish run and correctly mark just
+    # those packages publish_failed. `always()` here is only to tolerate
+    # empty (skipped) waves.
+    needs: [detect-changes, build-wave-0, build-wave-1, build-wave-2]
+    if: |
+      always() && (
+        needs.detect-changes.outputs.layer0 != '[]' ||
+        needs.detect-changes.outputs.layer1 != '[]' ||
+        needs.detect-changes.outputs.layer2 != '[]'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
