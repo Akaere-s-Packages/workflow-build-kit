@@ -26,7 +26,26 @@ work_dir=/tmp/build
 mkdir -p "$work_dir" "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"
 
-pacman -Sy --noconfirm --needed git
+# Network-bound steps (pacman mirror sync, cloning from aur.archlinux.org)
+# fail transiently often enough in CI — a mirror hiccup, a brief DNS
+# blip, AUR itself being momentarily slow — that failing the whole build
+# on the first attempt wastes a build slot on something that would have
+# just worked on retry. Real, non-transient failures (bad pkgbase, actual
+# build errors) still fail loudly after exhausting the attempts.
+retry() {
+  local attempts=3 delay=5 n=1
+  until "$@"; do
+    if (( n >= attempts )); then
+      echo "::error::command failed after $attempts attempts: $*" >&2
+      return 1
+    fi
+    echo "::warning::command failed (attempt $n/$attempts), retrying in ${delay}s: $*" >&2
+    sleep "$delay"
+    n=$((n + 1))
+  done
+}
+
+retry pacman -Sy --noconfirm --needed git
 
 if ! id builder &>/dev/null; then
   useradd -m builder
@@ -42,7 +61,7 @@ build_one() {
   rm -rf "$dir"
   # `su - builder` (with the dash) matters: without it $HOME stays /root,
   # which builder can't write to, and makepkg/git fail outright.
-  su - builder -c "git clone --depth 1 'https://aur.archlinux.org/${base}.git' '$dir'"
+  retry su - builder -c "rm -rf '$dir' && git clone --depth 1 'https://aur.archlinux.org/${base}.git' '$dir'"
 
   # A PKGBUILD that declares validpgpkeys expects those upstream release
   # keys to already be in the builder's keyring before makepkg verifies
