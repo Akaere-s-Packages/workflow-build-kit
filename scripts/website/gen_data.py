@@ -35,16 +35,10 @@ import json
 import pathlib
 import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "registry"))
+import aur_graph  # noqa: E402
 
-AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
 DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -58,45 +52,6 @@ def now_iso() -> str:
 
 def parse_iso(s: str) -> datetime.datetime:
     return datetime.datetime.strptime(s, DATE_FMT).replace(tzinfo=datetime.timezone.utc)
-
-
-def fetch_aur_info(names: list[str]) -> dict[str, dict]:
-    """One batched AUR RPC call, queried by package *name* (not pkgbase —
-    a split PKGBUILD's several pkgnames each have their own Depends/
-    MakeDepends/description/etc, and AUR RPC's info action is queryable by
-    the specific name). Returns a dict keyed by that same name."""
-    if not names:
-        return {}
-    qs = "&".join("arg[]=" + urllib.parse.quote(n) for n in sorted(set(names)))
-    try:
-        with urllib.request.urlopen(f"{AUR_RPC}?{qs}", timeout=30) as resp:
-            data = json.load(resp)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        print(f"::warning::AUR RPC lookup failed, continuing with stale AUR-sourced fields: {exc}", file=sys.stderr)
-        return {}
-    return {r["Name"]: r for r in data.get("results", [])}
-
-
-def load_registry(registry_root: pathlib.Path) -> list[dict]:
-    # Layout: <distro>/<type>/<name>/<name>.toml (e.g. archlinux/aur/asusctl/asusctl.toml).
-    entries = []
-    for toml_path in sorted(registry_root.glob("*/*/*/*.toml")):
-        distro, source_type, dirname, filename = toml_path.parts[-4:]
-        if filename != f"{dirname}.toml":
-            continue
-        table = tomllib.loads(toml_path.read_text())["PACKAGES"]
-        entries.append(
-            {
-                "distro": distro,
-                "type": source_type,
-                "name": table["name"],
-                "pkgbase": table.get("pkgbase", table["name"]),
-                "version": table["version"],
-                "autoupdate": bool(table.get("autoupdate", False)),
-                "toml_path": toml_path,
-            }
-        )
-    return entries
 
 
 def first_added_date(registry_root: pathlib.Path, toml_path: pathlib.Path) -> str | None:
@@ -198,7 +153,7 @@ def main() -> int:
     ap.add_argument("--built", type=pathlib.Path, help="path to this run's built_packages.json manifest")
     args = ap.parse_args()
 
-    registry_entries = load_registry(args.registry_root)
+    registry_entries = aur_graph.load_registry(args.registry_root)
     built_list = json.loads(args.built.read_text()) if args.built and args.built.exists() else []
     built_by_name = {b["name"]: b for b in built_list}
 
@@ -211,7 +166,7 @@ def main() -> int:
     # and AUR RPC's info action is queryable by the specific pkgname, not
     # just the pkgbase. Keying by pkgbase here would make every package
     # sharing a pkgbase silently inherit one of them's dependency list.
-    aur_by_name = fetch_aur_info([e["name"] for e in registry_entries])
+    aur_by_name = aur_graph.fetch_aur_info([e["name"] for e in registry_entries])
 
     # required_by: reverse-map of AUR's own Depends/OptDepends/MakeDepends
     # across every tracked package, restricted to names we ourselves track.

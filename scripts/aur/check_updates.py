@@ -17,6 +17,9 @@ duplicate work are both avoided.
 Must run inside a checkout of the Registry repo, on branch "main", with
 git user.name/user.email already configured and GH_TOKEN in the
 environment (used by both `git push` over https and `gh pr create`/`edit`).
+GH_TOKEN is read from the environment by git/gh themselves, never passed
+as a literal argument, so it's safe that every command run here (with its
+full stdout/stderr) is printed unconditionally for debugging.
 
 Usage: check_updates.py --registry-root <path to the checkout>
 """
@@ -26,20 +29,58 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "registry"))
 import aur_graph  # noqa: E402
 
 BASE_BRANCH = "main"
+RETRY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
 
 
 def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(args, check=check, capture_output=True, text=True)
+    """Runs a command and unconditionally prints what it was and what it
+    produced — no secret is ever passed as a literal argument to anything
+    run here, so there's nothing to redact. This is deliberately more
+    verbose than the default: a previous version swallowed output on
+    failure (capture_output + check=True raises before anything gets
+    printed), which made a failed git/gh call show up as a bare Python
+    traceback with no indication of what the command itself actually
+    said."""
+    print(f"+ {' '.join(args)}", file=sys.stderr)
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    if result.stdout:
+        sys.stdout.write(result.stdout if result.stdout.endswith("\n") else result.stdout + "\n")
+    if result.stderr:
+        sys.stderr.write(result.stderr if result.stderr.endswith("\n") else result.stderr + "\n")
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, args, result.stdout, result.stderr)
+    return result
+
+
+def retry_run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Same as run(), but for the network-bound calls (git fetch/push,
+    gh pr *) — worth surviving a transient GitHub/network blip rather
+    than failing the whole run over one. Local-only git operations
+    (checkout, add, commit, branch -D) don't need this."""
+    result = None
+    for n in range(1, RETRY_ATTEMPTS + 1):
+        result = run(*args, check=False)
+        if result.returncode == 0:
+            return result
+        if n < RETRY_ATTEMPTS:
+            print(f"::warning::command failed (attempt {n}/{RETRY_ATTEMPTS}), retrying in {RETRY_DELAY_SECONDS}s: {' '.join(args)}", file=sys.stderr)
+            time.sleep(RETRY_DELAY_SECONDS)
+    if check and result.returncode != 0:
+        print(f"::error::command failed after {RETRY_ATTEMPTS} attempts: {' '.join(args)}", file=sys.stderr)
+        raise subprocess.CalledProcessError(result.returncode, args, result.stdout, result.stderr)
+    return result
 
 
 def find_open_pr(branch: str) -> dict | None:
-    result = run("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,title", check=False)
+    result = retry_run("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,title", check=False)
     if result.returncode != 0 or not result.stdout.strip():
         return None
     prs = json.loads(result.stdout)
@@ -49,7 +90,8 @@ def find_open_pr(branch: str) -> dict | None:
 def branch_file_version(branch: str, rel_path: str) -> str | None:
     """The `version = "..."` currently on `origin/<branch>` for that file,
     or None if the branch/file doesn't exist. Requires `origin/<branch>` to
-    already be fetched."""
+    already be fetched. Purely local (reads the already-fetched ref from
+    the local object database), so no retry needed."""
     result = run("git", "show", f"origin/{branch}:{rel_path}", check=False)
     if result.returncode != 0:
         return None
@@ -64,7 +106,7 @@ def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str,
     existing_pr = find_open_pr(branch)
 
     if existing_pr:
-        run("git", "fetch", "origin", branch, check=False)
+        retry_run("git", "fetch", "origin", branch, check=False)
         already_current = all(
             branch_file_version(branch, str(dirty[name]["entry"]["toml_path"].relative_to(registry_root))) == dirty[name]["new_version"]
             for name in ordered
@@ -105,7 +147,7 @@ def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str,
             run("git", "commit", "-m", subject)
             pr_body_lines.append(f"- `{subject}` — https://aur.archlinux.org/packages/{d['entry']['pkgbase']}")
 
-        run("git", "push", "--force", "origin", branch)
+        retry_run("git", "push", "--force", "origin", branch)
 
         if len(ordered) == 1:
             title = f"{ordered[0]}: update to {dirty[ordered[0]]['new_version']}"
@@ -114,10 +156,10 @@ def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str,
         body = "\n".join(pr_body_lines)
 
         if existing_pr:
-            run("gh", "pr", "edit", str(existing_pr["number"]), "--title", title, "--body", body)
+            retry_run("gh", "pr", "edit", str(existing_pr["number"]), "--title", title, "--body", body)
             print(f"updated PR #{existing_pr['number']} ({branch})")
         else:
-            pr = run("gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", BASE_BRANCH)
+            pr = retry_run("gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", BASE_BRANCH)
             print(pr.stdout.strip())
     except (subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"::error::failed to prepare PR for {branch}: {exc}", file=sys.stderr)

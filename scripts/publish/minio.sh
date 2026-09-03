@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Trace every command by default (see build/package.sh for why). Unlike
+# that script, this one DOES handle secrets (R2 keys, GPG passphrase) — the
+# two lines that pass them as literal CLI args are individually wrapped in
+# `set +x`/`set -x` below so their values never reach the trace output at
+# all. Don't rely solely on GitHub's log redaction for that; this script
+# can also be run locally with real secrets in the environment.
+set -x
 
 # Publishes one already-built package to the MinIO-backed pacman repo (GPG
 # signing it along the way), then deletes old *files* of that same package
@@ -35,7 +42,25 @@ distro="${DISTRO:-archlinux}"
 alias_name="akaere-minio"
 remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"
 
+# Same retry() as build/package.sh: R2 is a network call like anything
+# else, and worth surviving a transient blip rather than failing the
+# whole publish over one.
+retry() {
+  local attempts=3 delay=5 n=1
+  until "$@"; do
+    if (( n >= attempts )); then
+      echo "::error::command failed after $attempts attempts: $*" >&2
+      return 1
+    fi
+    echo "::warning::command failed (attempt $n/$attempts), retrying in ${delay}s: $*" >&2
+    sleep "$delay"
+    n=$((n + 1))
+  done
+}
+
+set +x  # never trace the credentials themselves
 mc alias set "$alias_name" "${R2_ENDPOINT:?}" "${R2_ACCESS_KEY_ID:?}" "${R2_SECRET_ACCESS_KEY:?}" >/dev/null
+set -x
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
@@ -56,16 +81,18 @@ pkg_basename="$(basename "$pkg_file")"
 # is the correct non-interactive way to sign with such a key — it's not
 # "no passphrase given", it's "the passphrase is the empty string", which
 # is what an unprotected private key actually expects.
+set +x  # never trace the passphrase itself
 gpg --batch --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
   --detach-sign --local-user "${GPG_KEY_ID:?}" "$pkg_basename"
+set -x
 sig_basename="${pkg_basename}.sig"
 
 repo-add -s -k "$GPG_KEY_ID" "$db_file" "$pkg_basename"
 
-mc cp "$pkg_basename" "$sig_basename" "$remote/"
-mc cp "$db_file" "$remote/$db_file"
-mc cp "$files_file" "$remote/$files_file"
-mc cp "${db_file}.sig" "$remote/${db_file}.sig"
+retry mc cp "$pkg_basename" "$sig_basename" "$remote/"
+retry mc cp "$db_file" "$remote/$db_file"
+retry mc cp "$files_file" "$remote/$files_file"
+retry mc cp "${db_file}.sig" "$remote/${db_file}.sig"
 # pacman's default `Server = .../x86_64` + `[reponame]` setup actually
 # requests the EXTENSIONLESS name (reponame.db), not reponame.db.tar.gz —
 # the .tar.gz name is the "real" file, .db/.files are traditionally a
@@ -73,14 +100,19 @@ mc cp "${db_file}.sig" "$remote/${db_file}.sig"
 # bytes twice. Critically, the signature needs the same treatment: without
 # reponame.db.sig, `SigLevel = Required` fails signature verification the
 # moment a client fetches reponame.db instead of reponame.db.tar.gz.
-mc cp "$db_file" "$remote/${repo_name}.db"
-mc cp "${db_file}.sig" "$remote/${repo_name}.db.sig"
-mc cp "$files_file" "$remote/${repo_name}.files"
+retry mc cp "$db_file" "$remote/${repo_name}.db"
+retry mc cp "${db_file}.sig" "$remote/${repo_name}.db.sig"
+retry mc cp "$files_file" "$remote/${repo_name}.files"
 
 echo "published $pkg_basename"
 
 # --- retention: keep only the newest $keep_versions *files* for $name ---
-existing="$(mc ls "$remote/" 2>/dev/null | awk '{print $NF}' | grep -E "^${name}-.+-x86_64\.pkg\.tar\.zst$" || true)"
+# A failed listing here just means this run's cleanup is skipped (`|| true`
+# below) rather than the whole publish failing — the package we just
+# published is already safely up, and the next successful run will catch
+# up on retention. Still worth a retry first since it's cheap.
+list_versions() { mc ls "$remote/"; }
+existing="$(retry list_versions | awk '{print $NF}' | grep -E "^${name}-.+-x86_64\.pkg\.tar\.zst$" || true)"
 
 versions=()
 while IFS= read -r f; do

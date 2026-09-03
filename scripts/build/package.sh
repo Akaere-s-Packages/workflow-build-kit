@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Trace every command (with expanded arguments) to stderr by default. No
+# secret ever flows through this script (GPG passphrase / R2 credentials
+# only exist in publish/minio.sh), so there's nothing here that needs
+# hiding — and full command-level tracing is exactly what was missing the
+# times a build failed with nothing more than "Error: Process completed
+# with exit code 1" and no visible reason why.
+set -x
 
 # Builds one AUR package with makepkg and emits, into $out_dir:
 #   <name>-<version>-x86_64.pkg.tar.zst   the built package
@@ -61,7 +68,11 @@ build_one() {
   rm -rf "$dir"
   # `su - builder` (with the dash) matters: without it $HOME stays /root,
   # which builder can't write to, and makepkg/git fail outright.
-  retry su - builder -c "rm -rf '$dir' && git clone --depth 1 'https://aur.archlinux.org/${base}.git' '$dir'"
+  # GIT_CURL_VERBOSE surfaces the actual HTTP/TLS-level reason for a clone
+  # failure (DNS, timeout, TLS handshake, HTTP status) instead of just
+  # git's one-line summary — the difference between this and a bare
+  # "Error: Process completed with exit code 1" with nothing else to go on.
+  retry su - builder -c "rm -rf '$dir' && GIT_CURL_VERBOSE=1 git clone --depth 1 'https://aur.archlinux.org/${base}.git' '$dir'"
 
   # A PKGBUILD that declares validpgpkeys expects those upstream release
   # keys to already be in the builder's keyring before makepkg verifies
@@ -95,7 +106,10 @@ build_one() {
   # extra build time — just a bit of extra disk for the sibling package's
   # file we don't keep. The match-exactly-one-file check below picks out
   # only the one this Registry entry actually tracks.
-  su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
+  # makepkg also does its own network I/O (downloading the actual
+  # upstream sources, plus `-s` pulling any missing sync-repo deps via
+  # pacman) — worth the same retry treatment as the clone above.
+  retry su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
 # Chained AUR-only dependencies must be built and installed into the

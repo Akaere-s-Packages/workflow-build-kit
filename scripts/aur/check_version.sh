@@ -8,7 +8,10 @@ set -euo pipefail
 
 pkgbase="${1:?pkgbase required}"
 
-response="$(curl -fsS --get "https://aur.archlinux.org/rpc/v5/info" --data-urlencode "arg[]=${pkgbase}")"
+# curl's own retry handling: --retry-all-errors covers transient network
+# errors AUR occasionally throws (connection resets, brief timeouts).
+response="$(curl -fsS --retry 3 --retry-delay 5 --retry-all-errors \
+  --get "https://aur.archlinux.org/rpc/v5/info" --data-urlencode "arg[]=${pkgbase}")"
 
 version="$(echo "$response" | jq -r '.results[0].Version // empty')"
 

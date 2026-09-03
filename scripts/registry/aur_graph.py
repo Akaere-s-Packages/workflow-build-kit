@@ -12,6 +12,8 @@ graph gets built.
 """
 import json
 import pathlib
+import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,8 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
 AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
+RETRY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
 
 
 def load_registry(root: pathlib.Path) -> list[dict]:
@@ -52,16 +56,28 @@ def fetch_aur_info(names: list[str]) -> dict[str, dict]:
     """One batched AUR RPC call, queried by package *name* (not pkgbase —
     a split PKGBUILD's several pkgnames each have their own Depends/
     MakeDepends, and AUR RPC's info action is queryable by the specific
-    name). Returns a dict keyed by that same name."""
+    name). Returns a dict keyed by that same name.
+
+    Retries a few times before giving up — a transient AUR RPC hiccup
+    shouldn't take down every script that calls this (version checks,
+    build ordering) on the first blip."""
     if not names:
         return {}
     qs = "&".join("arg[]=" + urllib.parse.quote(n) for n in sorted(set(names)))
-    try:
-        with urllib.request.urlopen(f"{AUR_RPC}?{qs}", timeout=30) as resp:
-            data = json.load(resp)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return {}
-    return {r["Name"]: r for r in data.get("results", [])}
+    url = f"{AUR_RPC}?{qs}"
+    last_exc: Exception | None = None
+    for n in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                data = json.load(resp)
+            return {r["Name"]: r for r in data.get("results", [])}
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if n < RETRY_ATTEMPTS:
+                print(f"::warning::AUR RPC lookup failed (attempt {n}/{RETRY_ATTEMPTS}), retrying in {RETRY_DELAY_SECONDS}s: {exc}", file=sys.stderr)
+                time.sleep(RETRY_DELAY_SECONDS)
+    print(f"::warning::AUR RPC lookup failed after {RETRY_ATTEMPTS} attempts, continuing with no AUR data: {last_exc}", file=sys.stderr)
+    return {}
 
 
 def strip_version_constraint(dep: str) -> str:
