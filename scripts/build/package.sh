@@ -86,6 +86,15 @@ build_one() {
     fi
   fi
 
+  # Note: current makepkg (verified against 7.1.0) has no flag to restrict
+  # which pkgname(s) of a split PKGBUILD actually get packaged — `-s`
+  # always packages every pkgname the PKGBUILD declares in one run (e.g.
+  # asusctl's PKGBUILD also produces rog-control-center every time it's
+  # built, regardless of which one we're actually after). The compile
+  # step is shared and only runs once either way, so this doesn't cost
+  # extra build time — just a bit of extra disk for the sibling package's
+  # file we don't keep. The match-exactly-one-file check below picks out
+  # only the one this Registry entry actually tracks.
   su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
@@ -95,14 +104,15 @@ build_one() {
 for dep in "${aur_depends[@]:-}"; do
   [[ -z "$dep" ]] && continue
   build_one "$dep"
-  dep_pkg=$(find "$work_dir/$dep" -maxdepth 1 -name '*.pkg.tar.zst' | head -n1)
+  dep_pkg=$(find "$work_dir/$dep" -maxdepth 1 -name "${dep}-"*-x86_64.pkg.tar.zst | head -n1)
   su - builder -c "sudo pacman -U --noconfirm '$dep_pkg'"
 done
 
 build_one "$pkgbase"
 
 # A PKGBUILD can produce more than one pkgname; this Registry entry only
-# tracks the one named $name.
+# tracks (and keeps) the one named $name — the rest of makepkg's output
+# for this build gets discarded along with the whole container.
 shopt -s nullglob
 matches=("$work_dir/$pkgbase/${name}-"*-x86_64.pkg.tar.zst)
 shopt -u nullglob
