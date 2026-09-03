@@ -175,11 +175,14 @@ jobs:
           cat > out/manifest.json <<EOF
           {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
           EOF
+      - name: stage artifact filenames
+        if: always()
+        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-${{ matrix.name }}
-          path: out/
+          path: artifact/
           if-no-files-found: warn
 
   build-wave-1:
@@ -244,11 +247,14 @@ jobs:
           cat > out/manifest.json <<EOF
           {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
           EOF
+      - name: stage artifact filenames
+        if: always()
+        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-${{ matrix.name }}
-          path: out/
+          path: artifact/
           if-no-files-found: warn
 
   build-wave-2:
@@ -314,11 +320,14 @@ jobs:
           cat > out/manifest.json <<EOF
           {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
           EOF
+      - name: stage artifact filenames
+        if: always()
+        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-${{ matrix.name }}
-          path: out/
+          path: artifact/
           if-no-files-found: warn
 
   build-wave-3:
@@ -384,11 +393,14 @@ jobs:
           cat > out/manifest.json <<EOF
           {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
           EOF
+      - name: stage artifact filenames
+        if: always()
+        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-${{ matrix.name }}
-          path: out/
+          path: artifact/
           if-no-files-found: warn
 
   build-wave-4:
@@ -453,11 +465,14 @@ jobs:
           cat > out/manifest.json <<EOF
           {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
           EOF
+      - name: stage artifact filenames
+        if: always()
+        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-${{ matrix.name }}
-          path: out/
+          path: artifact/
           if-no-files-found: warn
 
   publish:
@@ -494,6 +509,12 @@ jobs:
           pattern: build-*
           path: artifacts
 
+      - name: restore artifact filenames
+        run: |
+          for artifact_dir in artifacts/build-*/; do
+            [[ -d "$artifact_dir" ]] || continue
+            python3 build-kit/scripts/build/stage_artifact.py restore "$artifact_dir"
+          done
       - name: sign, publish, and assemble final manifest (inside archlinux:base-devel)
         # repo-add/vercmp are part of the `pacman` package itself — there's
         # no apt equivalent and no portable static binary for them, so this
