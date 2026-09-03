@@ -373,6 +373,19 @@ jobs:
 
   website-data:
     needs: publish
+    # `always()` overrides the default "skip if any job in the whole
+    # upstream chain was skipped" behavior — bare `success()` (what a job
+    # with no `if:` gets implicitly) checks every transitively-needed job,
+    # not just `publish` directly, and build-wave-1/build-wave-2 are
+    # legitimately skipped whenever their layer is empty (the common case
+    # for a dependency graph shallower than 3 levels). Without this, that
+    # skip cascaded all the way through here even on a fully successful
+    # publish. `needs.publish.result == 'success'` (not merely "ran") is
+    # the actual condition that matters: publish's own job status stays
+    # "success" even when some individual packages inside it end up
+    # publish_failed (that's recorded in the artifact, not the job's exit
+    # code) — only skip this if publish itself never produced its artifact.
+    if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -426,6 +439,11 @@ jobs:
 
   update-readme:
     needs: website-data
+    # Same cascade-skip issue as website-data above, one level further
+    # down: website-data's own result now correctly reflects whether it
+    # actually ran, so checking it directly (rather than reaching back to
+    # publish/build-wave-*) is enough.
+    if: always() && needs.website-data.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
