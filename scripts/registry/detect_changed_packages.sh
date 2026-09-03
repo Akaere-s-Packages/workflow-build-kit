@@ -14,16 +14,33 @@ set -euo pipefail
 #                                                       registry, regardless
 #                                                       of git history — for
 #                                                       a manual full rebuild
+#   detect_changed_packages.sh --names <json-file>     packages named in a
+#                                                       JSON string array
 
-if [[ "${1:-}" == "--all" ]]; then
-  python3 - <<'PY'
+if [[ "${1:-}" == "--all" || "${1:-}" == "--names" ]]; then
+  python3 - "${1:-}" "${2:-}" <<'PY'
 import json
 import pathlib
+import sys
+
+mode, names_path = sys.argv[1:]
+names = None
+if mode == "--names":
+    try:
+        with open(names_path) as names_file:
+            names = json.load(names_file)
+    except OSError as error:
+        raise SystemExit(f"cannot read package names file {names_path!r}: {error}")
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid package names JSON in {names_path!r}: {error}")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise SystemExit("package names must be a JSON array of strings")
+    names = set(names)
 
 packages = []
 for toml_path in sorted(pathlib.Path(".").glob("*/*/*/*.toml")):
     distro, source_type, name, filename = toml_path.parts[-4:]
-    if filename != f"{name}.toml":
+    if filename != f"{name}.toml" or names is not None and name not in names:
         continue
     packages.append({"distro": distro, "type": source_type, "name": name, "path": str(toml_path)})
 

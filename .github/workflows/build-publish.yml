@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: false
+      retry-failed:
+        description: Rebuild and republish packages with an open build-failure issue, ignoring base-sha/head-sha.
+        required: false
+        type: boolean
+        default: false
     secrets:
       R2_ENDPOINT:
         required: true
@@ -75,9 +80,15 @@ jobs:
           ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
           path: .build-kit
       - id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
             .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
+          elif [[ "${{ inputs.retry-failed }}" == "true" ]]; then
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open --label build-failure --limit 1000 --json title |
+              jq '[.[].title | select(startswith("[build-failure] ")) | ltrimstr("[build-failure] ")]' > failed-names.json
+            .build-kit/scripts/registry/detect_changed_packages.sh --names failed-names.json > changed.json
           else
             .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
           fi

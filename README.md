@@ -121,6 +121,17 @@ jobs:
 
 Use this after a fix to `build/package.sh` (or similar) that should apply retroactively, after rotating the GPG signing key, or to recover from a bad publish — not part of the normal per-change flow.
 
+### Retry failed packages
+
+`build-publish.yml` also accepts `retry-failed: true`, used by
+`Registry/.github/workflows/retry-failed.yml`. It finds open issues carrying the
+`build-failure` label, extracts their machine-generated `[build-failure] <name>`
+titles, and selects current Registry manifests with those names. The selected
+packages and their hard dependents are rebuilt in normal dependency order.
+Malformed issue titles and titles for deleted manifests are ignored. A successful
+retry publishes the package and closes its failure issue; an unsuccessful retry
+leaves the issue open for another manual retry.
+
 ## Known simplifications
 
 - Everything assumes a single `x86_64` architecture.
