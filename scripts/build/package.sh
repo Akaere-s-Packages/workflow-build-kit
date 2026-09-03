@@ -43,7 +43,31 @@ build_one() {
   # `su - builder` (with the dash) matters: without it $HOME stays /root,
   # which builder can't write to, and makepkg/git fail outright.
   su - builder -c "git clone --depth 1 'https://aur.archlinux.org/${base}.git' '$dir'"
-  su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed"
+
+  # A PKGBUILD that declares validpgpkeys expects those upstream release
+  # keys to already be in the builder's keyring before makepkg verifies
+  # the downloaded source's detached signature — but every build starts
+  # from a completely fresh container, so that key is never there yet.
+  # .SRCINFO lists the full fingerprint(s) makepkg actually needs (AUR
+  # requires it to be kept in sync with the PKGBUILD).
+  local skip_pgp_check=""
+  local keys
+  keys="$(grep -oP '(?<=validpgpkeys = )[0-9A-Fa-f]+' "$dir/.SRCINFO" 2>/dev/null | tr '\n' ' ')"
+  if [[ -n "$keys" ]]; then
+    local imported=false
+    for ks in keyserver.ubuntu.com keys.openpgp.org pgp.mit.edu; do
+      if su - builder -c "gpg --keyserver $ks --keyserver-options timeout=15 --recv-keys $keys" &>/dev/null; then
+        imported=true
+        break
+      fi
+    done
+    if [[ "$imported" != true ]]; then
+      echo "::warning::couldn't fetch PGP key(s) [$keys] for $base from any keyserver — building with --skippgpcheck" >&2
+      skip_pgp_check="--skippgpcheck"
+    fi
+  fi
+
+  su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
 # Chained AUR-only dependencies must be built and installed into the
