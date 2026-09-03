@@ -2,10 +2,10 @@
 set -euo pipefail
 # Trace every command by default (see build/package.sh for why). Unlike
 # that script, this one DOES handle secrets (R2 keys, GPG passphrase) — the
-# two lines that pass them as literal CLI args are individually wrapped in
-# `set +x`/`set -x` below so their values never reach the trace output at
-# all. Don't rely solely on GitHub's log redaction for that; this script
-# can also be run locally with real secrets in the environment.
+# lines that pass them as literal CLI args are individually wrapped in
+# `set +x`/`set -x` (in repo_lib.sh) so their values never reach the trace
+# output at all. Don't rely solely on GitHub's log redaction for that; this
+# script can also be run locally with real secrets in the environment.
 set -x
 
 # Publishes one already-built package to the MinIO-backed pacman repo (GPG
@@ -14,6 +14,13 @@ set -x
 # per pkgname — repo-add replaces the previous entry outright — so this is
 # purely about not leaving stale package files (and R2 storage) behind,
 # not about the db itself.
+#
+# Publishes a single package end-to-end: download the current db, sign +
+# repo-add this one package into it, upload the db back, prune. For
+# publishing a whole batch of packages in one job (as build-publish.yml's
+# `publish` step does), use publish_all.sh instead — it reuses the same
+# functions (see repo_lib.sh) but downloads/uploads the db exactly once for
+# the entire batch rather than once per package.
 #
 # Usage: minio.sh <name> <pkg-file>
 # Required env: R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
@@ -42,95 +49,9 @@ distro="${DISTRO:-archlinux}"
 alias_name="akaere-minio"
 remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"
 
-# Same retry() as build/package.sh: R2 is a network call like anything
-# else, and worth surviving a transient blip rather than failing the
-# whole publish over one.
-retry() {
-  local attempts=3 delay=5 n=1
-  until "$@"; do
-    if (( n >= attempts )); then
-      echo "::error::command failed after $attempts attempts: $*" >&2
-      return 1
-    fi
-    echo "::warning::command failed (attempt $n/$attempts), retrying in ${delay}s: $*" >&2
-    sleep "$delay"
-    n=$((n + 1))
-  done
-}
-# Downloads a repository metadata object, retrying failures other than a
-# missing-object response. A missing object is valid only when both
-# metadata files are absent on the first-ever publish; callers distinguish it
-# with status 2 instead of silently treating every R2 error as missing.
-#
-# mc's actual wording for a missing key against a real Cloudflare R2 bucket
-# is "Object does not exist" — NOT the raw S3 error code "NoSuchKey" that
-# an earlier version of this check assumed (and that the test suite's fake
-# `mc` stub had been echoing verbatim, so the test passed while the real
-# thing didn't: a bootstrap publish against a genuinely-empty repo retried
-# 3 times and hard-failed instead of proceeding to create the initial db).
-# Matching "Object does not exist" specifically (not a broader "does not
-# exist") matters: a *bucket*-level 404 ("The specified bucket does not
-# exist") is a real misconfiguration — wrong R2_BUCKET — and must still
-# fail loudly, not get silently treated as "first publish, going ahead".
-download_metadata_file() {
-  local source="$1" destination="$2"
-  local attempts=3 delay=5 n=1 output
+source "$(dirname "${BASH_SOURCE[0]}")/repo_lib.sh"
 
-  while true; do
-    if output="$(mc cp "$source" "$destination" 2>&1)"; then
-      return 0
-    fi
-    if [[ "$output" == *"NoSuchKey"* || "$output" == *"Object does not exist"* ]]; then
-      echo "repository metadata is absent: $source" >&2
-      return 2
-    fi
-    echo "$output" >&2
-    if (( n >= attempts )); then
-      echo "::error::metadata download failed after $attempts attempts: $source" >&2
-      return 1
-    fi
-    echo "::warning::metadata download failed (attempt $n/$attempts), retrying in ${delay}s: $source" >&2
-    sleep "$delay"
-    n=$((n + 1))
-  done
-}
-
-download_metadata_pair() {
-  local db_state files_state status
-
-  if download_metadata_file "$remote/$db_file" .; then
-    db_state=present
-  else
-    status=$?
-    case "$status" in
-      2) db_state=missing ;;
-      *) return "$status" ;;
-    esac
-  fi
-
-  if download_metadata_file "$remote/$files_file" .; then
-    files_state=present
-  else
-    status=$?
-    case "$status" in
-      2) files_state=missing ;;
-      *) return "$status" ;;
-    esac
-  fi
-
-  if [[ "$db_state" != "$files_state" ]]; then
-    echo "::error::incomplete remote repository metadata: $db_file is $db_state, $files_file is $files_state" >&2
-    return 1
-  fi
-  if [[ "$db_state" == missing ]]; then
-    echo "repository metadata is absent; creating the initial repository" >&2
-  fi
-}
-
-
-set +x  # never trace the credentials themselves
-mc alias set "$alias_name" "${R2_ENDPOINT:?}" "${R2_ACCESS_KEY_ID:?}" "${R2_SECRET_ACCESS_KEY:?}" >/dev/null
-set -x
+mc_alias_set
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
@@ -146,92 +67,12 @@ download_metadata_pair
 
 cp "$pkg_file" .
 pkg_basename="$(basename "$pkg_file")"
-
-# GPG_PASSPHRASE is optional: a signing key made specifically for
-# unattended CI use commonly has no passphrase at all. `--passphrase ""`
-# is the correct non-interactive way to sign with such a key — it's not
-# "no passphrase given", it's "the passphrase is the empty string", which
-# is what an unprotected private key actually expects.
-set +x  # never trace the passphrase itself
-gpg --batch --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
-  --detach-sign --local-user "${GPG_KEY_ID:?}" "$pkg_basename"
-set -x
 sig_basename="${pkg_basename}.sig"
 
-repo-add -s -k "$GPG_KEY_ID" "$db_file" "$pkg_basename"
-
-retry mc cp "$pkg_basename" "$sig_basename" "$remote/"
-retry mc cp "$db_file" "$remote/$db_file"
-retry mc cp "$files_file" "$remote/$files_file"
-retry mc cp "${db_file}.sig" "$remote/${db_file}.sig"
-# pacman's default `Server = .../x86_64` + `[reponame]` setup actually
-# requests the EXTENSIONLESS name (reponame.db), not reponame.db.tar.gz —
-# the .tar.gz name is the "real" file, .db/.files are traditionally a
-# symlink to it on real mirrors. S3 has no symlinks, so we upload the same
-# bytes twice. Critically, the signature needs the same treatment: without
-# reponame.db.sig, `SigLevel = Required` fails signature verification the
-# moment a client fetches reponame.db instead of reponame.db.tar.gz.
-retry mc cp "$db_file" "$remote/${repo_name}.db"
-retry mc cp "${db_file}.sig" "$remote/${repo_name}.db.sig"
-retry mc cp "$files_file" "$remote/${repo_name}.files"
+sign_and_add "$pkg_basename"
+upload_package_file "$pkg_basename" "$sig_basename"
+upload_repo
 
 echo "published $pkg_basename"
 
-# --- retention: keep only the newest $keep_versions *files* for $name ---
-# A failed listing here just means this run's cleanup is skipped (`|| true`
-# below) rather than the whole publish failing — the package we just
-# published is already safely up, and the next successful run will catch
-# up on retention. Still worth a retry first since it's cheap.
-#
-# The filter below requires *exactly* three more hyphen-free tokens after
-# "$name-" — [epoch:]pkgver, pkgrel, and arch — rather than the old
-# `.+-x86_64` glob. Two real reasons, not just tidiness:
-#   1. arch isn't always x86_64 — an arch=(any) package (fonts, pure-data
-#      packages: noto-fonts-sc is one right now) produces .../<pkgrel>-any.pkg.tar.zst,
-#      which the old hardcoded suffix simply never matched, silently
-#      disabling retention for every such package.
-#   2. `.+` is greedy enough to also match a DIFFERENT, longer package's
-#      files whenever one tracked name is a literal prefix of another —
-#      samsung-unified-driver-{common,printer,scanner} are exactly that
-#      relative to samsung-unified-driver. Since pkgver/pkgrel/arch can
-#      never themselves contain a hyphen (only [epoch:]pkgver can contain a
-#      colon), requiring exactly three hyphen-free trailing tokens is enough
-#      to reject "samsung-unified-driver-common-1.00.39-11-x86_64..." when
-#      pruning plain "samsung-unified-driver" (that remainder splits into
-#      four tokens, not three) — the old pattern would have quietly treated
-#      one package's files as another's stale versions and deleted them.
-list_versions() { mc ls "$remote/"; }
-existing="$(retry list_versions | awk '{print $NF}' | grep -E "^${name}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$" || true)"
-
-versions=()
-declare -A file_for_version=()
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  if [[ "$f" =~ ^${name}-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]]; then
-    v="${BASH_REMATCH[1]}"
-    versions+=("$v")
-    file_for_version["$v"]="$f"
-  fi
-done <<< "$existing"
-
-# Insertion-sort descending by vercmp (newest first). Small N, O(n^2) is fine.
-sorted=()
-for v in "${versions[@]}"; do
-  placed=false
-  for i in "${!sorted[@]}"; do
-    if (( $(vercmp "$v" "${sorted[$i]}") > 0 )); then
-      sorted=("${sorted[@]:0:$i}" "$v" "${sorted[@]:$i}")
-      placed=true
-      break
-    fi
-  done
-  [[ $placed == true ]] || sorted+=("$v")
-done
-
-for v in "${sorted[@]:$keep_versions}"; do
-  stale="${file_for_version[$v]}"
-  echo "pruning old version: $stale"
-  if ! retry mc rm "$remote/$stale" "$remote/${stale}.sig"; then
-    echo "::warning::could not prune $stale; retention will retry on the next publish" >&2
-  fi
-done
+prune_old_versions "$name" "$keep_versions"
