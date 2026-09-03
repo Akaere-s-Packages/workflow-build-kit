@@ -11,7 +11,11 @@
 #   repo_name, distro, alias_name, remote, db_file, files_file
 # (see minio.sh / publish_all.sh for the exact derivation — identical in
 # both). GPG_KEY_ID/GPG_PASSPHRASE and the R2_* secrets are read directly
-# from the environment, same as before this was split out.
+# from the environment, same as before this was split out. A caller using
+# prune_removed_packages must also pre-declare `any_pruned=false` — that
+# function sets it (deliberately not `local`) when it actually removes
+# something, the same caller-owned-global convention as the rest of this
+# list.
 
 retry() {
   local attempts=3 delay=5 n=1
@@ -248,4 +252,75 @@ prune_old_versions() {
       echo "::warning::could not prune $stale; retention will retry on the next publish" >&2
     fi
   done
+}
+
+# --- reconcile: remove packages the Registry no longer tracks at all ---
+# Unlike prune_old_versions (which keeps the newest N *versions* of a
+# package the Registry still lists), this removes a package ENTIRELY once
+# its Registry entry is gone — repo-remove's the db entry and deletes every
+# remaining file for it in R2.
+#
+# Takes $1 as a newline-separated list of every pkgname the Registry
+# currently tracks FOR THIS DISTRO (the caller derives it straight from the
+# checked-out Registry tree, e.g. `registry/$distro/*/*/*.toml` basenames —
+# not from this run's git diff). That's deliberate: comparing current
+# Registry state against current db state is a reconciliation, not a diff
+# against history, so it self-heals a package left behind by ANY prior
+# gap (a squash-merged deletion, a rebuild-all run, the exact class of bug
+# detect_changed_packages.sh's --diff-filter=d fixes) on the very next
+# ordinary publish — not just one caused by this specific run's changes.
+#
+# Safety-critical: an empty $1 almost always means a broken/missing
+# Registry checkout, NOT "the registry is genuinely empty" (this project
+# has never shipped zero packages). Since the whole point of this function
+# is to delete anything NOT in that list, treating an empty list as
+# legitimate would repo-remove and delete every single package in the
+# repo. Refuse instead.
+#
+# Sets the caller's `any_pruned=true` (like this file's other functions,
+# not declared `local` here — see the module comment at the top) the
+# moment anything actually gets repo-removed, so the caller knows the LOCAL
+# db changed and is worth uploading even when nothing was staged to build.
+prune_removed_packages() {
+  local desired="$1"
+  local db_names name stale f
+
+  if [[ -z "${desired//[$'\n\t ']/}" ]]; then
+    echo "::error::refusing to reconcile the repo db: desired package list is empty (Registry checkout likely broken/missing) — this would delete every published package" >&2
+    return 1
+  fi
+
+  # A db that doesn't exist yet (first-ever publish for this distro) has
+  # nothing to reconcile against.
+  [[ -f "$db_file" ]] || return 0
+
+  # Read pkgname from each entry's %NAME% field rather than splitting the
+  # db's own "<name>-<pkgver>-<pkgrel>" directory names — sidesteps the
+  # exact hyphen/epoch-colon ambiguity prune_old_versions above has to
+  # work around with a careful regex, since the field is unambiguous.
+  db_names="$(bsdtar -xOf "$db_file" --include '*/desc' 2>/dev/null | awk '/^%NAME%$/{getline; print}' | sort -u)"
+
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    grep -qxF "$name" <<< "$desired" && continue
+
+    echo "removing package no longer in the Registry: $name"
+    if ! repo-remove -s -k "$GPG_KEY_ID" "$db_file" "$name"; then
+      echo "::warning::repo-remove failed for $name; it will remain in the db until a future publish retries this" >&2
+      continue
+    fi
+    any_pruned=true
+
+    # Same 3-trailing-token shape prune_old_versions relies on
+    # ([epoch:]pkgver, pkgrel, arch) — removes every remaining version's
+    # package + signature, not just old ones, since the package is gone
+    # entirely.
+    stale="$(retry mc ls "$remote/" | awk '{print $NF}' | grep -E "^${name}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$" || true)"
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      if ! retry mc rm "$remote/$f" "$remote/${f}.sig"; then
+        echo "::warning::could not remove stale file for removed package $name: $f" >&2
+      fi
+    done <<< "$stale"
+  done <<< "$db_names"
 }

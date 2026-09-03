@@ -70,6 +70,7 @@ jobs:
       layer2: ${{ steps.resolve.outputs.layer2 }}
       layer3: ${{ steps.resolve.outputs.layer3 }}
       layer4: ${{ steps.resolve.outputs.layer4 }}
+      removed-count: ${{ steps.detect.outputs.removed-count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,14 +86,28 @@ jobs:
         run: |
           if [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
             .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
+            removed_count=0
           elif [[ "${{ inputs.retry-failed }}" == "true" ]]; then
             gh issue list --repo "$GITHUB_REPOSITORY" --state open --label build-failure --limit 1000 --json title |
               jq '[.[].title | select(startswith("[build-failure] ")) | ltrimstr("[build-failure] ")]' > failed-names.json
             .build-kit/scripts/registry/detect_changed_packages.sh --names failed-names.json > changed.json
+            removed_count=0
           else
             .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+            # Packages deleted between base-sha and head-sha don't need
+            # building (detect_changed_packages.sh already excludes them
+            # via --diff-filter=d) but DO need the publish job to run at
+            # all so it can reconcile them out of the repo db — a push
+            # that ONLY deletes packages would otherwise stage nothing to
+            # build and the publish job's `if:` below would skip it
+            # entirely. This is only a trigger signal; the actual pruning
+            # in publish_all.sh reconciles against the full current
+            # Registry tree, not this specific list.
+            removed_count=$(git diff --diff-filter=D --name-only "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" -- '*/*/*/*.toml' | grep -c . || true)
           fi
           echo "changed packages:"; cat changed.json
+          echo "removed toml count: $removed_count"
+          echo "removed-count=$removed_count" >> "$GITHUB_OUTPUT"
       - id: resolve
         run: |
           # Expands the literally-changed set to everything hard-dependent
@@ -500,7 +515,8 @@ jobs:
         needs.detect-changes.outputs.layer1 != '[]' ||
         needs.detect-changes.outputs.layer2 != '[]' ||
         needs.detect-changes.outputs.layer3 != '[]' ||
-        needs.detect-changes.outputs.layer4 != '[]'
+        needs.detect-changes.outputs.layer4 != '[]' ||
+        needs.detect-changes.outputs.removed-count != '0'
       )
     runs-on: ubuntu-latest
     # repo-add performs a read-modify-write of the shared R2 repository DB.
@@ -510,6 +526,9 @@ jobs:
       group: akaere-r2-pacman-repository
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
       - uses: actions/checkout@v4
         with:
           repository: Akaere-s-Packages/workflow-build-kit

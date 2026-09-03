@@ -52,7 +52,13 @@ fi
 base_ref="${1:?base ref required (or pass --all to list every package)}"
 head_ref="${2:?head ref required}"
 
-changed="$(git diff --name-only "$base_ref" "$head_ref" -- '*/*/*/*.toml' || true)"
+# --diff-filter=d excludes deletions: a removed toml has nothing to build
+# (resolve_build_order.py would otherwise treat its now-vanished name as an
+# unresolvable "unknown package" and hard-fail the whole run). Cleaning up
+# a removed package's published files is handled separately, by the
+# publish job reconciling the current Registry tree against the repo db —
+# see repo_lib.sh's prune_removed_packages.
+changed="$(git diff --name-only --diff-filter=d "$base_ref" "$head_ref" -- '*/*/*/*.toml' || true)"
 
 if [[ -z "$changed" ]]; then
   echo '[]'

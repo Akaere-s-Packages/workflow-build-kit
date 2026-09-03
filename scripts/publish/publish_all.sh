@@ -25,9 +25,12 @@ set -x
 # shared sign/upload/prune functions minio.sh (the standalone,
 # one-package-at-a-time path) also uses.
 #
-# Must run from the job workspace root (the directory holding both
-# `artifacts/` — this run's downloaded build-* artifacts — and `build-kit/`
-# — this checkout of workflow-build-kit itself, for scripts/publish/repo_lib.sh).
+# Must run from the job workspace root (the directory holding `artifacts/`
+# — this run's downloaded build-* artifacts —, `build-kit/` — this
+# checkout of workflow-build-kit itself, for scripts/publish/repo_lib.sh —,
+# and `registry/` — a checkout of the Registry repo itself, used only to
+# read its current file tree so prune_removed_packages knows what SHOULD
+# still be published; nothing here reads Registry file contents).
 #
 # Required env: R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
 #               GPG_PRIVATE_KEY (base64-encoded armored export)
@@ -100,16 +103,17 @@ for dir in artifacts/build-*/; do
   fi
 done
 
+# Distros to process come from the Registry checkout itself (path
+# "registry/", see build-publish.yml), not from this run's staged names —
+# a push that only DELETES packages stages nothing to build, but its
+# distro's db still needs reconciling below. (A distro whose very last
+# package is removed in one push has no directory left here to discover at
+# all; out of scope for now — there's exactly one distro today and
+# emptying it entirely in one push isn't a realistic case yet.)
 distros=()
-for name in "${names[@]:-}"; do
-  [[ -z "$name" ]] && continue
-  [[ "${entry_status[$name]}" == "staged" ]] || continue
-  d="${entry_distro[$name]}"
-  seen=false
-  for existing in "${distros[@]:-}"; do
-    [[ "$existing" == "$d" ]] && { seen=true; break; }
-  done
-  [[ "$seen" == true ]] || distros+=("$d")
+for d in registry/*/; do
+  [[ -d "$d" ]] || continue
+  distros+=("$(basename "$d")")
 done
 
 bucket="${R2_BUCKET:?R2_BUCKET required}"
@@ -130,6 +134,21 @@ for distro in "${distros[@]:-}"; do
   # no reliable base db for this distro, nothing in the batch can safely
   # proceed for it.
   download_metadata_pair
+
+  # Reconcile: repo-remove (+ delete from R2) anything still in the db
+  # whose Registry entry is gone, using the CURRENT Registry tree for this
+  # distro as the desired set — not this run's diff — so it self-heals any
+  # prior gap, not just a removal from this specific push. See
+  # prune_removed_packages in repo_lib.sh for the full rationale and its
+  # empty-desired-list safety guard.
+  desired_names="$(
+    shopt -s nullglob
+    for toml in "$root_dir/registry/$distro"/*/*/*.toml; do
+      basename "$toml" .toml
+    done
+  )"
+  any_pruned=false
+  prune_removed_packages "$desired_names"
 
   any_staged=false
   for name in "${names[@]:-}"; do
@@ -160,7 +179,7 @@ for distro in "${distros[@]:-}"; do
   done
 
   db_upload_ok=true
-  if [[ "$any_staged" == true ]]; then
+  if [[ "$any_staged" == true || "$any_pruned" == true ]]; then
     if upload_repo; then
       echo "published repo db for $distro"
       if ! upload_public_key; then
@@ -168,7 +187,7 @@ for distro in "${distros[@]:-}"; do
       fi
     else
       db_upload_ok=false
-      echo "::error::final repository db upload failed for $distro — no staged package in this batch actually landed in the published index" >&2
+      echo "::error::final repository db upload failed for $distro — no staged package or removal in this batch actually landed in the published index" >&2
     fi
   fi
 
