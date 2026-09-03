@@ -94,6 +94,28 @@ Each wave is its own job (`build-wave-0`/`1`/`2`), matrixed in parallel internal
 
 `pr-preview.yml` does the same expansion but flattens all layers into one parallel matrix — build order doesn't matter there (nothing depends on `makepkg` running in a particular sequence for a preview build), only "build everything related" does.
 
+### Manual full rebuild
+
+`build-publish.yml` also takes an optional `rebuild-all: true` input, which skips the git-diff-based change detection entirely (`registry/detect_changed_packages.sh --all`) and treats every package in the registry as "changed" — `resolve_build_order.py` then just lays the whole registry out into build layers instead of an expanded subset. Wire it up as its own manually-triggered workflow:
+
+```yaml
+# Registry/.github/workflows/rebuild-all.yml
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  issues: write
+  actions: read
+jobs:
+  build-publish:
+    uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/build-publish.yml@main
+    with:
+      rebuild-all: true
+    secrets: inherit
+```
+
+Use this after a fix to `build/package.sh` (or similar) that should apply retroactively, after rotating the GPG signing key, or to recover from a bad publish — not part of the normal per-change flow.
+
 ## Known simplifications
 
 - Everything assumes a single `x86_64` architecture.

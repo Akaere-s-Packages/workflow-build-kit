@@ -14,11 +14,18 @@ on:
   workflow_call:
     inputs:
       base-sha:
-        required: true
+        description: Ignored when rebuild-all is true.
+        required: false
         type: string
       head-sha:
-        required: true
+        description: Ignored when rebuild-all is true.
+        required: false
         type: string
+      rebuild-all:
+        description: Rebuild and republish every package in the registry, ignoring base-sha/head-sha.
+        required: false
+        type: boolean
+        default: false
     secrets:
       R2_ENDPOINT:
         required: true
@@ -63,7 +70,11 @@ jobs:
           path: .build-kit
       - id: detect
         run: |
-          .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+          if [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
+            .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
+          else
+            .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+          fi
           echo "changed packages:"; cat changed.json
       - id: resolve
         run: |
@@ -401,7 +412,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "no data changes"
           else
-            git commit -m "chore: sync package data from Registry@${{ inputs.head-sha }}"
+            git commit -m "chore: sync package data from Registry@${{ github.sha }}"
             git push
           fi
 

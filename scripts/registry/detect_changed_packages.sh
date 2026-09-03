@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prints a JSON array of {"distro","type","name","path"} for every Registry
-# package TOML that changed between two refs. Must be run from inside a
-# checkout of the Registry repo with enough history to diff (fetch-depth: 0).
+# Prints a JSON array of {"distro","type","name","path"} for Registry
+# packages. Must be run from inside a checkout of the Registry repo.
 #
 # Layout: <distro>/<type>/<name>/<name>.toml (e.g. archlinux/aur/asusctl/asusctl.toml).
 #
-# Usage: detect_changed_packages.sh <base-ref> <head-ref>
+# Two modes:
+#   detect_changed_packages.sh <base-ref> <head-ref>   only what changed
+#                                                       between two refs
+#                                                       (needs fetch-depth: 0)
+#   detect_changed_packages.sh --all                   every package in the
+#                                                       registry, regardless
+#                                                       of git history — for
+#                                                       a manual full rebuild
 
-base_ref="${1:?base ref required}"
+if [[ "${1:-}" == "--all" ]]; then
+  python3 - <<'PY'
+import json
+import pathlib
+
+packages = []
+for toml_path in sorted(pathlib.Path(".").glob("*/*/*/*.toml")):
+    distro, source_type, name, filename = toml_path.parts[-4:]
+    if filename != f"{name}.toml":
+        continue
+    packages.append({"distro": distro, "type": source_type, "name": name, "path": str(toml_path)})
+
+print(json.dumps(packages))
+PY
+  exit 0
+fi
+
+base_ref="${1:?base ref required (or pass --all to list every package)}"
 head_ref="${2:?head ref required}"
 
 changed="$(git diff --name-only "$base_ref" "$head_ref" -- '*/*/*/*.toml' || true)"
