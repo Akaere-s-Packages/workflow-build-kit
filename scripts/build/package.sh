@@ -117,39 +117,49 @@ build_one() {
   retry su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
-# The file makepkg actually produces for one pkgname of a (possibly split)
-# build: <pkgname>-[<epoch>:]<pkgver>-<pkgrel>-<arch>.pkg.tar.zst, taken
-# straight from .SRCINFO's pkgbase-level fields rather than guessed. A
-# plain "${pkgname}-"* glob is NOT safe to pick this out on its own:
-# makepkg's automatic debug-package feature (active by default whenever the
-# built binaries have unstripped symbols — no PKGBUILD opt-in needed) adds
-# an extra <pkgname>-debug-... file that also matches "${pkgname}-"*, and
-# isn't listed anywhere in the PKGBUILD/.SRCINFO pkgname array to filter
-# out by name. This bit asusctl for real once its build started producing
-# unstripped binaries: the glob matched both asusctl-6.4.0-1-x86_64.pkg.tar.zst
-# and asusctl-debug-6.4.0-1-x86_64.pkg.tar.zst.
+# The file makepkg actually names one pkgname's output as — asked straight
+# from makepkg itself (`--packagelist`, which sources the PKGBUILD exactly
+# like a real build does — including running a pkgver() function — and
+# just prints every output path, without building anything) instead of
+# reconstructed by hand from .SRCINFO fields.
 #
-# Two more real, since-fixed wrong assumptions from an earlier version of
-# this function, both caught by noto-fonts-sc actually building: epoch IS
-# part of the filename when the PKGBUILD sets one (makepkg names it
-# noto-fonts-sc-2:20210430-2-any.pkg.tar.zst, not .../20210430-2-...) even
-# though it's dropped from `pacman -Q` display — and arch isn't always
-# x86_64; an arch=(any) package (most font/data-only packages) produces
-# .../<pkgrel>-any.pkg.tar.zst, and hardcoding x86_64 here made this exact
-# "found 0, expected 1" the same way the debug-package glob mismatch did.
+# Reconstructing it from .SRCINFO was this function's previous design, and
+# it broke for real, twice:
+#   - hardcoding "-x86_64.pkg.tar.zst" doesn't work for arch=(any) packages
+#     (fonts, pure-data packages) or for epoch — makepkg's actual filename
+#     includes the epoch (noto-fonts-sc-2:20210430-2-any.pkg.tar.zst)
+#   - even after fixing that, linuxqq (epoch=5 at build time — the real
+#     output was linuxqq-5:3.2.33_52892-1-x86_64.pkg.tar.zst) STILL didn't
+#     match, because its committed .SRCINFO simply hadn't been regenerated
+#     since the PKGBUILD picked up that epoch. Nothing on AUR enforces
+#     PKGBUILD/.SRCINFO staying in sync — it's a maintainer convention, not
+#     a guarantee — so re-deriving a filename from .SRCINFO can never be
+#     fully reliable. Asking makepkg directly sidesteps the whole class of
+#     "our copy of the metadata disagrees with what actually got built".
+#
+# --packagelist's own output isn't unambiguous by itself either — verified
+# for real against a minimal two-pkgname split PKGBUILD, it printed THREE
+# lines for two declared pkgnames, the third being the auto-generated
+# debug package neither pkgname array nor .SRCINFO ever mentions. Filtering
+# for exactly three trailing hyphen-free tokens ([epoch:]pkgver, pkgrel,
+# arch) after "$pkgname-" rules that out the same way publish/minio.sh's
+# retention matcher does: none of those three fields can contain a hyphen,
+# so a sibling pkgname or a "-debug" output whose name happens to share
+# this one as a prefix always leaves a leftover fourth token.
 expected_package_file() {
   local base="$1" pkgname="$2"
-  local srcinfo="$work_dir/$base/.SRCINFO"
-  local pkgver pkgrel epoch arch version_component
-  pkgver="$(grep -m1 -oP '(?<=pkgver = ).+' "$srcinfo")"
-  pkgrel="$(grep -m1 -oP '(?<=pkgrel = ).+' "$srcinfo")"
-  arch="$(grep -m1 -oP '(?<=arch = ).+' "$srcinfo")"
-  # epoch is genuinely optional (most PKGBUILDs never set one) — `|| true`
-  # is load-bearing here exactly like the validpgpkeys lookup above: grep's
-  # "no match" exit code is the expected, common outcome, not an error.
-  epoch="$(grep -m1 -oP '(?<=epoch = ).+' "$srcinfo" || true)"
-  version_component="${epoch:+${epoch}:}${pkgver}"
-  echo "$work_dir/$base/${pkgname}-${version_component}-${pkgrel}-${arch}.pkg.tar.zst"
+  local dir="$work_dir/$base"
+  local list f base_name
+  list="$(su - builder -c "cd '$dir' && makepkg --packagelist")"
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    base_name="$(basename "$f")"
+    if [[ "$base_name" =~ ^${pkgname}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.[a-z]+$ ]]; then
+      echo "$f"
+      return 0
+    fi
+  done <<< "$list"
+  echo "$dir/$pkgname"  # deliberately nonexistent; caller checks -f and errors
 }
 
 # Chained AUR-only dependencies must be built and installed into the
