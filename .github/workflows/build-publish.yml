@@ -2,7 +2,7 @@ name: build-publish
 
 # Called by Registry's own push-to-main workflow after a PR merges. Builds
 # every changed package, GPG-signs and publishes the successful ones to
-# the MinIO-backed pacman repo, refreshes WebSite-Kit's data, updates
+# the R2-backed pacman repo, refreshes WebSite-Kit's data, updates
 # Registry/README.md, and opens/closes per-package failure Issues on
 # Registry.
 #
@@ -19,13 +19,13 @@ on:
         required: true
         type: string
     secrets:
-      MINIO_ENDPOINT:
+      R2_ENDPOINT:
         required: true
-      MINIO_ACCESS_KEY:
+      R2_ACCESS_KEY_ID:
         required: true
-      MINIO_SECRET_KEY:
+      R2_SECRET_ACCESS_KEY:
         required: true
-      MINIO_BUCKET:
+      R2_BUCKET:
         required: true
       GPG_PRIVATE_KEY:
         required: true
@@ -161,10 +161,10 @@ jobs:
 
       - name: sign, publish, and assemble final manifest
         env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
-          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-          MINIO_BUCKET: ${{ secrets.MINIO_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
@@ -186,7 +186,7 @@ jobs:
                 status="published"
               else
                 status="publish_failed"
-                echo "::error::failed to publish $name to MinIO"
+                echo "::error::failed to publish $name to R2"
               fi
             fi
 

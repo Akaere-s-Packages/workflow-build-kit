@@ -9,7 +9,7 @@ set -euo pipefail
 # manual `pacman -U` downgrades, not about the db itself.
 #
 # Usage: minio.sh <name> <pkg-file>
-# Required env: MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET
+# Required env: R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
 #               GPG_KEY_ID GPG_PASSPHRASE
 # Optional env: REPO_NAME (default "akaere"), KEEP_VERSIONS (default 3),
 #               DISTRO (default "archlinux")
@@ -31,9 +31,9 @@ repo_name="${REPO_NAME:-akaere}"
 keep_versions="${KEEP_VERSIONS:-3}"
 distro="${DISTRO:-archlinux}"
 alias_name="akaere-minio"
-remote="${alias_name}/${MINIO_BUCKET:?MINIO_BUCKET required}/${distro}/x86_64"
+remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"
 
-mc alias set "$alias_name" "${MINIO_ENDPOINT:?}" "${MINIO_ACCESS_KEY:?}" "${MINIO_SECRET_KEY:?}" >/dev/null
+mc alias set "$alias_name" "${R2_ENDPOINT:?}" "${R2_ACCESS_KEY_ID:?}" "${R2_SECRET_ACCESS_KEY:?}" >/dev/null
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT

@@ -1,6 +1,6 @@
 # workflow-build-kit
 
-Reusable GitHub Actions workflows for [`Registry`](https://github.com/Akaere-s-Packages/Registry): build AUR packages, GPG-sign them, publish to a MinIO-backed pacman repo, sync [`WebSite-Kit`](https://github.com/Akaere-s-Packages/WebSite-Kit)'s display data, maintain Registry's own README, and check daily for upstream version updates.
+Reusable GitHub Actions workflows for [`Registry`](https://github.com/Akaere-s-Packages/Registry): build AUR packages, GPG-sign them, publish to a R2-backed pacman repo, sync [`WebSite-Kit`](https://github.com/Akaere-s-Packages/WebSite-Kit)'s display data, maintain Registry's own README, and check daily for upstream version updates.
 
 ## Reusable workflows
 
@@ -25,7 +25,7 @@ Secrets required (set on the Registry repo):
 
 | Secret | Used for |
 |---|---|
-| `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` | publishing to MinIO |
+| `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | publishing to R2 |
 | `GPG_PRIVATE_KEY` (base64-encoded armor export) / `GPG_PASSPHRASE` | signing packages |
 | `WEBSITE_KIT_PUSH_TOKEN` | a token with push access to the WebSite-Kit repo |
 
@@ -80,7 +80,7 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `aur/check_version.sh` | Look up one pkgbase's latest version on AUR |
 | `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open PRs |
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
-| `publish/minio.sh` | GPG-sign, `repo-add`, upload to MinIO, prune files beyond the newest 3 versions |
+| `publish/minio.sh` | GPG-sign, `repo-add`, upload to R2, prune files beyond the newest 3 versions |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |
 | `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment |
 
