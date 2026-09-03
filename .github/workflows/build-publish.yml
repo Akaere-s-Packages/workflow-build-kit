@@ -1,0 +1,325 @@
+name: build-publish
+
+# Called by Registry's own push-to-main workflow after a PR merges. Builds
+# every changed package, GPG-signs and publishes the successful ones to
+# the MinIO-backed pacman repo, refreshes WebSite-Kit's data, updates
+# Registry/README.md, and opens/closes per-package failure Issues on
+# Registry.
+#
+# Internal checkouts of this repo (workflow-build-kit) are pinned to
+# `main` for simplicity; move to a tagged release once this is stable.
+
+on:
+  workflow_call:
+    inputs:
+      base-sha:
+        required: true
+        type: string
+      head-sha:
+        required: true
+        type: string
+    secrets:
+      MINIO_ENDPOINT:
+        required: true
+      MINIO_ACCESS_KEY:
+        required: true
+      MINIO_SECRET_KEY:
+        required: true
+      MINIO_BUCKET:
+        required: true
+      GPG_PRIVATE_KEY:
+        required: true
+      GPG_PASSPHRASE:
+        required: true
+      WEBSITE_KIT_PUSH_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+  WEBSITE_KIT_REPO: Akaere-s-Packages/WebSite-Kit
+  PAGES_DOMAIN: packages.pysio.online
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+      - id: detect
+        run: |
+          packages=$(.build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}")
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          echo "changed packages: $packages"
+
+  build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    # Deliberately NOT `container: archlinux:base-devel` at the job level:
+    # actions/checkout needs a real `git` binary, and the base-devel group
+    # doesn't include one, so checkout would fail before package.sh ever
+    # gets a chance to install it. Instead we checkout normally on the
+    # host runner (which already has git + Docker) and only run the actual
+    # makepkg build inside the Arch container via `docker run`, bind-mounting
+    # the checkout. ubuntu-latest ships Docker pre-installed for this.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - id: meta
+        run: |
+          {
+            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
+            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: write manifest
+        if: always()
+        run: |
+          status="build_failed"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="built"
+          cat > out/manifest.json <<EOF
+          {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  publish:
+    # No `always()` needed: an individual package's build step uses
+    # continue-on-error, so the `build` job itself still reports success
+    # even when some matrix legs failed to build — that's what lets
+    # publish run and correctly mark just those packages publish_failed.
+    needs: [detect-changes, build]
+    if: needs.detect-changes.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: artifacts
+
+      - name: install mc
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+      - name: import gpg key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')" >> "$GITHUB_ENV"
+
+      - name: sign, publish, and assemble final manifest
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          MINIO_BUCKET: ${{ secrets.MINIO_BUCKET }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          final="[]"
+          for dir in artifacts/build-*/; do
+            manifest="$dir/manifest.json"
+            [[ -f "$manifest" ]] || continue
+            distro=$(jq -r .distro "$manifest")
+            name=$(jq -r .name "$manifest")
+            type=$(jq -r .type "$manifest")
+            pkgbase=$(jq -r .pkgbase "$manifest")
+            outcome=$(jq -r .build_outcome "$manifest")
+            job_url=$(jq -r .job_url "$manifest")
+
+            status="build_failed"
+            if [[ "$outcome" == "built" ]]; then
+              pkg_file=$(find "$dir" -maxdepth 1 -name "${name}-*-x86_64.pkg.tar.zst" | head -n1)
+              if [[ -n "$pkg_file" ]] && DISTRO="$distro" bash build-kit/scripts/publish/minio.sh "$name" "$pkg_file"; then
+                status="published"
+              else
+                status="publish_failed"
+                echo "::error::failed to publish $name to MinIO"
+              fi
+            fi
+
+            entry=$(jq -n \
+              --arg distro "$distro" --arg type "$type" --arg name "$name" --arg pkgbase "$pkgbase" \
+              --arg status "$status" --arg job_url "$job_url" --arg artifact_dir "$dir" \
+              '{distro:$distro,type:$type,name:$name,pkgbase:$pkgbase,build_status:$status,job_url:$job_url,artifact_dir:$artifact_dir}')
+            final=$(jq --argjson e "$entry" '. + [$e]' <<< "$final")
+          done
+          echo "$final" > built_packages.json
+          cat built_packages.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: built-manifest
+          path: built_packages.json
+
+  website-data:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WEBSITE_KIT_REPO }}
+          token: ${{ secrets.WEBSITE_KIT_PUSH_TOKEN }}
+          path: website-kit
+      - uses: actions/download-artifact@v4
+        with:
+          name: built-manifest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: artifacts
+      - name: rewrite artifact_dir to this job's download path
+        run: |
+          python3 - <<'PY'
+          import json
+          data = json.load(open("built_packages.json"))
+          for e in data:
+              e["artifact_dir"] = f"artifacts/build-{e['name']}"
+          json.dump(data, open("built_packages.json", "w"), indent=2)
+          PY
+      - name: generate website data
+        run: |
+          python3 build-kit/scripts/website/gen_data.py \
+            --registry-root registry \
+            --website-data-dir website-kit/src/_data \
+            --built built_packages.json
+      - name: commit and push
+        working-directory: website-kit
+        run: |
+          git config user.name "Lilithya"
+          git config user.email "me@lilithya.su"
+          git add src/_data
+          if git diff --cached --quiet; then
+            echo "no data changes"
+          else
+            git commit -m "chore: sync package data from Registry@${{ inputs.head-sha }}"
+            git push
+          fi
+
+  update-readme:
+    needs: website-data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WEBSITE_KIT_REPO }}
+          path: website-kit
+      - name: regenerate README package table
+        run: |
+          python3 build-kit/scripts/registry/update_readme.py \
+            --registry-root registry \
+            --website-data-dir website-kit/src/_data \
+            --pages-domain "${{ env.PAGES_DOMAIN }}"
+      - name: commit with the default token (does not retrigger this workflow)
+        working-directory: registry
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "no README changes"
+          else
+            git commit -m "chore: update package table"
+            git push
+          fi
+
+  notify-failures:
+    needs: publish
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: built-manifest
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const built = JSON.parse(fs.readFileSync('built_packages.json', 'utf8'));
+            for (const pkg of built) {
+              const title = `[build-failure] ${pkg.name}`;
+              const { data: issues } = await github.rest.issues.listForRepo({
+                owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'build-failure',
+              });
+              const existing = issues.find(i => i.title === title);
+              if (pkg.build_status !== 'published') {
+                const body = `Build/publish failed: \`${pkg.build_status}\`\n\n[View run log](${pkg.job_url})`;
+                if (existing) {
+                  await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+                } else {
+                  await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['build-failure'] });
+                }
+              } else if (existing) {
+                await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body: `Recovered, see [${pkg.job_url}](${pkg.job_url})` });
+                await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, state: 'closed' });
+              }
+            }

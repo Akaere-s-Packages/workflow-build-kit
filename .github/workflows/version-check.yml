@@ -1,0 +1,39 @@
+name: version-check
+
+# Called on a daily cron by Registry. Checks every autoupdate=true package
+# against AUR's live version and opens a PR per group of related updates —
+# see scripts/aur/check_updates.py for the grouping/commit logic (packages
+# that hard-depend on each other and are both out of date land in one PR,
+# each as its own commit following the AOSC packaging commit convention;
+# unrelated updates get their own PR). Each PR this opens then triggers
+# pr-preview.yml on its own, same as a human-authored PR would.
+
+on:
+  workflow_call:
+    secrets:
+      LILITHYA_PUSH_TOKEN:
+        required: true
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+
+jobs:
+  check-and-open-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+
+      - name: check for AUR updates and open PRs
+        env:
+          GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+        run: |
+          git config user.name "Lilithya"
+          git config user.email "me@lilithya.su"
+          python3 .build-kit/scripts/aur/check_updates.py --registry-root .

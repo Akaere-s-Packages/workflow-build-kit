@@ -1,0 +1,162 @@
+name: pr-preview
+
+# Called by Registry's PR workflow. Validates + builds changed packages
+# but never signs or publishes anything, then diffs the build output
+# against what's already publicly published (fetched straight from
+# WebSite-Kit's GitHub Pages JSON) and posts/updates one PR comment per
+# changed package.
+#
+# Deliberately accepts no secrets at all, so it's safe to run even on PRs
+# from forks.
+
+on:
+  workflow_call:
+    inputs:
+      base-sha:
+        required: true
+        type: string
+      head-sha:
+        required: true
+        type: string
+      pr-number:
+        required: true
+        type: number
+
+permissions:
+  pull-requests: write
+  contents: read
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+  PUBLISHED_BASE_URL: https://packages.pysio.online
+
+jobs:
+  detect-and-validate:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+      - id: detect
+        run: |
+          packages=$(.build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}")
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+      - name: validate schema
+        if: steps.detect.outputs.packages != '[]'
+        run: |
+          paths=$(echo '${{ steps.detect.outputs.packages }}' | python3 -c "import json,sys; print(' '.join(p['path'] for p in json.load(sys.stdin)))")
+          python3 .build-kit/scripts/registry/validate_schema.py $paths
+
+  build:
+    needs: detect-and-validate
+    if: needs.detect-and-validate.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-and-validate.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/Registry
+          ref: ${{ inputs.base-sha }}
+          path: registry-base
+      - id: meta
+        run: |
+          {
+            echo "pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")"
+            echo "aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")"
+            echo "new_version=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES']['version'])")"
+            echo "old_version=$(python3 -c "
+          import tomllib
+          try:
+              print(tomllib.load(open('registry-base/${{ matrix.path }}','rb'))['PACKAGES']['version'])
+          except FileNotFoundError:
+              print('')
+          ")"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: build diff comment body
+        id: diff
+        run: |
+          status="failure"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="success"
+          args=(--name "${{ matrix.name }}" --new-version "${{ steps.meta.outputs.new_version }}"
+                --build-status "$status" --job-url "${{ steps.jobinfo.outputs.url }}"
+                --published-base-url "${{ env.PUBLISHED_BASE_URL }}")
+          [[ -n "${{ steps.meta.outputs.old_version }}" ]] && args+=(--old-version "${{ steps.meta.outputs.old_version }}")
+          [[ "$status" == "success" ]] && args+=(--file-list "out/file_list.json")
+          python3 build-kit/scripts/preview/diff.py "${args[@]}" > comment_body.md
+          cat comment_body.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comment-${{ matrix.name }}
+          path: comment_body.md
+
+  comment:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: comment-*
+          path: comments
+          merge-multiple: true
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = 'comments';
+            if (!fs.existsSync(dir)) return;
+            for (const file of fs.readdirSync(dir)) {
+              const body = fs.readFileSync(path.join(dir, file), 'utf8');
+              const anchorMatch = body.match(/<!-- workflow-build-kit:(.+?) -->/);
+              if (!anchorMatch) continue;
+              const anchor = anchorMatch[0];
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: ${{ inputs.pr-number }},
+              });
+              const existing = comments.find(c => c.body.includes(anchor));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: ${{ inputs.pr-number }}, body });
+              }
+            }
