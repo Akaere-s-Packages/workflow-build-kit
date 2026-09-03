@@ -38,7 +38,11 @@ on:
       GPG_PRIVATE_KEY:
         required: true
       GPG_PASSPHRASE:
-        required: true
+        # Optional: a signing key made specifically for unattended CI use
+        # commonly has no passphrase at all. If this secret doesn't exist,
+        # `secrets: inherit` simply passes nothing and publish/minio.sh
+        # signs with an empty passphrase, which is correct for such a key.
+        required: false
       WEBSITE_KIT_PUSH_TOKEN:
         required: true
 

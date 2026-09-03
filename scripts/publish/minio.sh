@@ -10,8 +10,10 @@ set -euo pipefail
 #
 # Usage: minio.sh <name> <pkg-file>
 # Required env: R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
-#               GPG_KEY_ID GPG_PASSPHRASE
-# Optional env: REPO_NAME (default "akaere"), KEEP_VERSIONS (default 3),
+#               GPG_KEY_ID
+# Optional env: GPG_PASSPHRASE (empty/unset if the signing key itself has
+#               no passphrase — common for a key made just for CI use),
+#               REPO_NAME (default "akaere"), KEEP_VERSIONS (default 3),
 #               DISTRO (default "archlinux")
 #
 # The bucket is laid out as <DISTRO>/<arch>/... rather than just <arch>/...
@@ -49,7 +51,12 @@ mc cp "$remote/$files_file" . 2>/dev/null || true
 cp "$pkg_file" .
 pkg_basename="$(basename "$pkg_file")"
 
-gpg --batch --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:?}" \
+# GPG_PASSPHRASE is optional: a signing key made specifically for
+# unattended CI use commonly has no passphrase at all. `--passphrase ""`
+# is the correct non-interactive way to sign with such a key — it's not
+# "no passphrase given", it's "the passphrase is the empty string", which
+# is what an unprotected private key actually expects.
+gpg --batch --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
   --detach-sign --local-user "${GPG_KEY_ID:?}" "$pkg_basename"
 sig_basename="${pkg_basename}.sig"
 
