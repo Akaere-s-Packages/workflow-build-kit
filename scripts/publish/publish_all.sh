@@ -112,9 +112,11 @@ for name in "${names[@]:-}"; do
   [[ "$seen" == true ]] || distros+=("$d")
 done
 
+bucket="${R2_BUCKET:?R2_BUCKET required}"
+
 for distro in "${distros[@]:-}"; do
   [[ -z "$distro" ]] && continue
-  remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"
+  remote="${alias_name}/${bucket}/${distro}/x86_64"
   db_file="${repo_name}.db.tar.gz"
   files_file="${repo_name}.files.tar.gz"
 
@@ -161,6 +163,9 @@ for distro in "${distros[@]:-}"; do
   if [[ "$any_staged" == true ]]; then
     if upload_repo; then
       echo "published repo db for $distro"
+      if ! upload_public_key; then
+        echo "::warning::couldn't publish the public key file for $distro (packages are still published correctly; key distribution just isn't updated this run)" >&2
+      fi
     else
       db_upload_ok=false
       echo "::error::final repository db upload failed for $distro — no staged package in this batch actually landed in the published index" >&2

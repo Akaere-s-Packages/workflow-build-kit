@@ -169,6 +169,23 @@ upload_repo() {
   retry mc cp "$files_file" "$remote/${repo_name}.files"
 }
 
+# Publishes the signing key's own ASCII-armored public key to the BUCKET
+# ROOT (not under $remote, which is one distro's repo path — the key isn't
+# tied to any one distro) so real users have somewhere real to `curl`/
+# `pacman-key --add` it from, instead of having to dig a key ID out of a
+# CI log (which is all this repo could offer before this existed). Caller
+# must set `bucket` (just the bucket name, not the full alias/bucket/...
+# remote path). Safe to call on every publish: the key itself essentially
+# never changes, this just keeps the published copy in sync should it ever
+# get rotated. Best-effort by design — call sites treat a failure here as
+# a warning, not a reason to mark otherwise-successful package publishes
+# as failed; the pacman repo itself doesn't depend on this file at all,
+# only humans setting up a fresh machine do.
+upload_public_key() {
+  gpg --export --armor "${GPG_KEY_ID:?}" > "${repo_name}.gpg"
+  retry mc cp "${repo_name}.gpg" "${alias_name}/${bucket:?}/${repo_name}.gpg"
+}
+
 # --- retention: keep only the newest $2 *files* for package $1 ---
 # A failed listing here just means this run's cleanup is skipped (`|| true`
 # below) rather than the whole publish failing — the package is already

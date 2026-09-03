@@ -47,7 +47,8 @@ repo_name="${REPO_NAME:-akaere}"
 keep_versions="${KEEP_VERSIONS:-1}"
 distro="${DISTRO:-archlinux}"
 alias_name="akaere-minio"
-remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"
+bucket="${R2_BUCKET:?R2_BUCKET required}"
+remote="${alias_name}/${bucket}/${distro}/x86_64"
 
 source "$(dirname "${BASH_SOURCE[0]}")/repo_lib.sh"
 
@@ -74,5 +75,9 @@ upload_package_file "$pkg_basename" "$sig_basename"
 upload_repo
 
 echo "published $pkg_basename"
+
+if ! upload_public_key; then
+  echo "::warning::couldn't publish the public key file (the package itself is still published correctly)" >&2
+fi
 
 prune_old_versions "$name" "$keep_versions"
