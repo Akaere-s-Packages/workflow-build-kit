@@ -60,12 +60,14 @@ def parse_iso(s: str) -> datetime.datetime:
     return datetime.datetime.strptime(s, DATE_FMT).replace(tzinfo=datetime.timezone.utc)
 
 
-def fetch_aur_info(pkgbases: list[str]) -> dict[str, dict]:
-    """One batched AUR RPC call for every pkgbase we track. Returns a dict
-    keyed by pkgbase (AUR's Name == our pkgbase, since we query by that)."""
-    if not pkgbases:
+def fetch_aur_info(names: list[str]) -> dict[str, dict]:
+    """One batched AUR RPC call, queried by package *name* (not pkgbase —
+    a split PKGBUILD's several pkgnames each have their own Depends/
+    MakeDepends/description/etc, and AUR RPC's info action is queryable by
+    the specific name). Returns a dict keyed by that same name."""
+    if not names:
         return {}
-    qs = "&".join("arg[]=" + urllib.parse.quote(b) for b in sorted(set(pkgbases)))
+    qs = "&".join("arg[]=" + urllib.parse.quote(n) for n in sorted(set(names)))
     try:
         with urllib.request.urlopen(f"{AUR_RPC}?{qs}", timeout=30) as resp:
             data = json.load(resp)
@@ -203,15 +205,20 @@ def main() -> int:
     details_dir = args.website_data_dir / "packageDetails"
     details_dir.mkdir(parents=True, exist_ok=True)
 
-    pkgbase_by_name = {e["name"]: e["pkgbase"] for e in registry_entries}
-    aur_by_pkgbase = fetch_aur_info(list(pkgbase_by_name.values()))
+    # Fetch AUR RPC info keyed by package *name*, not pkgbase: a split
+    # PKGBUILD (one pkgbase, several pkgnames — e.g. asusctl also builds
+    # rog-control-center) gives each pkgname its own Depends/MakeDepends,
+    # and AUR RPC's info action is queryable by the specific pkgname, not
+    # just the pkgbase. Keying by pkgbase here would make every package
+    # sharing a pkgbase silently inherit one of them's dependency list.
+    aur_by_name = fetch_aur_info([e["name"] for e in registry_entries])
 
     # required_by: reverse-map of AUR's own Depends/OptDepends/MakeDepends
     # across every tracked package, restricted to names we ourselves track.
-    tracked_names = set(pkgbase_by_name)
+    tracked_names = {e["name"] for e in registry_entries}
     required_by: dict[str, list[str]] = {n: [] for n in tracked_names}
     for entry in registry_entries:
-        info = aur_by_pkgbase.get(entry["pkgbase"], {})
+        info = aur_by_name.get(entry["name"], {})
         deps = set(info.get("Depends", [])) | set(info.get("OptDepends", [])) | set(info.get("MakeDepends", []))
         for dep in deps:
             dep_name = dep.split(":", 1)[0].strip()
@@ -238,7 +245,7 @@ def main() -> int:
         name = entry["name"]
         existing_path = details_dir / f"{name}.json"
         existing = json.loads(existing_path.read_text()) if existing_path.exists() else None
-        aur = aur_by_pkgbase.get(entry["pkgbase"], {})
+        aur = aur_by_name.get(entry["name"], {})
 
         detail = build_detail(entry, aur, built_by_name.get(name), existing)
         detail["required_by"] = [{"name": n} for n in sorted(required_by.get(name, []))]

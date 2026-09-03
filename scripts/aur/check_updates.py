@@ -140,16 +140,16 @@ def main() -> int:
         return 0
 
     try:
-        aur_info = aur_graph.fetch_aur_info([e["pkgbase"] for e in candidates])
+        aur_info = aur_graph.fetch_aur_info([e["name"] for e in candidates])
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"::error::AUR RPC lookup failed: {exc}", file=sys.stderr)
         return 1
 
     dirty: dict[str, dict] = {}
     for e in candidates:
-        info = aur_info.get(e["pkgbase"])
+        info = aur_info.get(e["name"])
         if not info:
-            print(f"::warning::AUR has no package '{e['pkgbase']}', skipping {e['name']}")
+            print(f"::warning::AUR has no package named '{e['name']}' (pkgbase '{e['pkgbase']}'), skipping")
             continue
         upstream = info["Version"]
         if upstream != e["version"]:

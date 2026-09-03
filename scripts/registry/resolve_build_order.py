@@ -61,7 +61,7 @@ def main() -> int:
         return 1
 
     try:
-        aur_info = aur_graph.fetch_aur_info([e["pkgbase"] for e in entries])
+        aur_info = aur_graph.fetch_aur_info([e["name"] for e in entries])
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"::warning::AUR RPC lookup failed ({exc}), building only the literally-changed packages with no expansion", file=sys.stderr)
         print(json.dumps([changed] + [[]] * (args.max_layers - 1)))

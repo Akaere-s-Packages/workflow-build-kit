@@ -48,12 +48,14 @@ def load_registry(root: pathlib.Path) -> list[dict]:
     return entries
 
 
-def fetch_aur_info(pkgbases: list[str]) -> dict[str, dict]:
-    """One batched AUR RPC call. Returns a dict keyed by pkgbase (AUR's
-    Name == our pkgbase, since that's what we query by)."""
-    if not pkgbases:
+def fetch_aur_info(names: list[str]) -> dict[str, dict]:
+    """One batched AUR RPC call, queried by package *name* (not pkgbase —
+    a split PKGBUILD's several pkgnames each have their own Depends/
+    MakeDepends, and AUR RPC's info action is queryable by the specific
+    name). Returns a dict keyed by that same name."""
+    if not names:
         return {}
-    qs = "&".join("arg[]=" + urllib.parse.quote(b) for b in sorted(set(pkgbases)))
+    qs = "&".join("arg[]=" + urllib.parse.quote(n) for n in sorted(set(names)))
     try:
         with urllib.request.urlopen(f"{AUR_RPC}?{qs}", timeout=30) as resp:
             data = json.load(resp)
@@ -84,7 +86,7 @@ def build_graph(entries: list[dict], aur_info: dict[str, dict]) -> dict[str, set
     tracked = {e["name"] for e in entries}
     depends_on: dict[str, set[str]] = {}
     for e in entries:
-        info = aur_info.get(e["pkgbase"], {})
+        info = aur_info.get(e["name"], {})
         depends_on[e["name"]] = dep_names(info) & tracked - {e["name"]}
     return depends_on
 
