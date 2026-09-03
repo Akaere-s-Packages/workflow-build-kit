@@ -68,6 +68,9 @@ Requires `LILITHYA_PUSH_TOKEN`: a token with permission to branch, push, and ope
 
 Packages that hard-depend on each other (via AUR's `Depends`/`MakeDepends`) and both have updates available are bundled into a single PR — one commit per package, dependencies committed before dependents, each commit message following the [AOSC packaging commit convention](https://wiki.aosc.io/developer/packaging/package-styling-manual/) (`$pkgname: update to $pkgver`). Unrelated updates each get their own PR.
 
+If a group's branch already has an open PR, this doesn't open a second one: it force-pushes the branch in place with the current target versions and updates the PR's title/body, or leaves it untouched if it's already at the exact versions being targeted.
+
+Every PR this opens/updates gets GitHub's native auto-merge enabled (rebase strategy) using the same `LILITHYA_PUSH_TOKEN`, so it merges itself once its required status checks (pr-preview's build) pass — no extra secret, and `pr-preview.yml` stays exactly as secret-free as before. This needs two one-time repo settings that no workflow can set: **Allow auto-merge** and **Allow rebase merging** under Settings → General, plus pr-preview's build check added as a required status check on `main`'s branch protection.
 ## `scripts/`
 
 Organized by pipeline stage. Every script can run standalone outside a workflow (only depends on standard command-line tools: `bsdtar`/`pacman`/`mc`/`gpg`/`git`/`gh`/`jq`, no extra package dependencies):
@@ -80,7 +83,7 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `registry/aur_graph.py` | Shared dependency-graph helpers (batched AUR RPC fetch, hard-Depends/MakeDepends graph, connected components, topological/layered ordering) — imported by both `aur/check_updates.py` and `registry/resolve_build_order.py`, not run standalone |
 | `registry/resolve_build_order.py` | Expand a changed-package set to everything hard-dependent on it, laid out in up to N dependency-ordered build layers |
 | `aur/check_version.sh` | Look up one pkgbase's latest version on AUR |
-| `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open PRs |
+| `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open/force-update PRs, enable auto-merge on them |
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
 | `publish/minio.sh` | GPG-sign, `repo-add`, upload to R2, prune files beyond the newest 3 versions |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |

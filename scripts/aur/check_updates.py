@@ -14,6 +14,15 @@ versions being targeted (e.g. two runs in a row with nothing new upstream
 since the PR was opened), it's left untouched — no-op force-pushes and
 duplicate work are both avoided.
 
+Every PR this creates or updates gets GitHub's native auto-merge enabled
+(rebase strategy), so it merges itself the moment its required status
+checks pass — no human has to come back and click merge on routine version
+bumps. This relies on repo-level settings that only a human can turn on
+once (Settings → General → "Allow auto-merge" / "Allow rebase merging",
+and pr-preview's check configured as required on branch protection for
+main) — see Docs/06-pr-preview-and-notifications.md in the planning repo
+for the full prerequisite list.
+
 Must run inside a checkout of the Registry repo, on branch "main", with
 git user.name/user.email already configured and GH_TOKEN in the
 environment (used by both `git push` over https and `gh pr create`/`edit`).
@@ -99,6 +108,36 @@ def branch_file_version(branch: str, rel_path: str) -> str | None:
     return m.group(1) if m else None
 
 
+def enable_auto_merge(branch: str) -> None:
+    """Turns on GitHub's native auto-merge (rebase strategy) for the PR on
+    `branch`, so it merges itself as soon as its required status checks
+    (pr-preview's build) go green — reusing the LILITHYA_PUSH_TOKEN already
+    in scope here, no extra secret or workflow needed.
+
+    Requires two one-time, human-only repo settings that no workflow can
+    set: "Allow auto-merge" and "Allow rebase merging" under Settings →
+    General, plus pr-preview's check added as a required status check on
+    main's branch protection (otherwise there's nothing for auto-merge to
+    actually wait on, and it may merge immediately). See Docs/06.
+
+    Idempotent: called again on a PR that already has auto-merge enabled
+    (the common case on a force-update run for a still-open PR, and after
+    this run's first run the steady-state outcome on every future daily
+    run for that PR) just no-ops instead of failing the whole run — and
+    does so on the first attempt, without burning through retries, since
+    "already enabled" isn't a transient condition retrying could fix.
+    """
+    result = None
+    for n in range(1, RETRY_ATTEMPTS + 1):
+        result = run("gh", "pr", "merge", branch, "--auto", "--rebase", check=False)
+        if result.returncode == 0 or "already enabled" in (result.stderr or "").lower():
+            return
+        if n < RETRY_ATTEMPTS:
+            print(f"::warning::command failed (attempt {n}/{RETRY_ATTEMPTS}), retrying in {RETRY_DELAY_SECONDS}s: gh pr merge {branch} --auto --rebase", file=sys.stderr)
+            time.sleep(RETRY_DELAY_SECONDS)
+    print(f"::warning::couldn't enable auto-merge for {branch}: {(result.stderr or '').strip()}", file=sys.stderr)
+
+
 def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str, set[str]], registry_root: pathlib.Path) -> None:
     ordered = aur_graph.topo_order(group, depends_on)
     branch = "bump/" + "+".join(ordered)
@@ -161,6 +200,8 @@ def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str,
         else:
             pr = retry_run("gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", BASE_BRANCH)
             print(pr.stdout.strip())
+
+        enable_auto_merge(branch)
     except (subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"::error::failed to prepare PR for {branch}: {exc}", file=sys.stderr)
     finally:
