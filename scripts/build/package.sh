@@ -215,7 +215,11 @@ for line in listing.splitlines():
     if mode.startswith("d") or path.startswith("."):
         continue
     size = int(size)
-    files.append({"path": path, "size_bytes": size})
+    # bsdtar lists paths relative to the archive root (e.g. "opt/1Password/1password",
+    # never a leading "/") — but these are real installed absolute paths once pacman
+    # extracts the package onto a live system, so store them that way everywhere this
+    # feeds into (website file listings, PR-preview diff comments).
+    files.append({"path": f"/{path}", "size_bytes": size})
     total += size
 
 with open(out_path, "w") as f:
