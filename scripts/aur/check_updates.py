@@ -6,15 +6,24 @@ commit convention: "$pkgname: update to $pkgver"), and open one PR per
 group. Packages with no dependency relationship to any other pending
 update each get their own single-package PR.
 
+If a group's branch already has an open PR, this doesn't open a second
+one: it force-pushes the branch (rebuilt fresh from main, so it never
+accumulates stale commits) with the current target versions and updates
+the PR's title/body in place. If that branch is already at the exact
+versions being targeted (e.g. two runs in a row with nothing new upstream
+since the PR was opened), it's left untouched — no-op force-pushes and
+duplicate work are both avoided.
+
 Must run inside a checkout of the Registry repo, on branch "main", with
 git user.name/user.email already configured and GH_TOKEN in the
-environment (used by both `git push` over https and `gh pr create`).
+environment (used by both `git push` over https and `gh pr create`/`edit`).
 
 Usage: check_updates.py --registry-root <path to the checkout>
 """
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import urllib.error
@@ -29,16 +38,46 @@ def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(args, check=check, capture_output=True, text=True)
 
 
-def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str, set[str]]) -> None:
+def find_open_pr(branch: str) -> dict | None:
+    result = run("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,title", check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    prs = json.loads(result.stdout)
+    return prs[0] if prs else None
+
+
+def branch_file_version(branch: str, rel_path: str) -> str | None:
+    """The `version = "..."` currently on `origin/<branch>` for that file,
+    or None if the branch/file doesn't exist. Requires `origin/<branch>` to
+    already be fetched."""
+    result = run("git", "show", f"origin/{branch}:{rel_path}", check=False)
+    if result.returncode != 0:
+        return None
+    m = re.search(r'version\s*=\s*"([^"]+)"', result.stdout)
+    return m.group(1) if m else None
+
+
+def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str, set[str]], registry_root: pathlib.Path) -> None:
     ordered = aur_graph.topo_order(group, depends_on)
     branch = "bump/" + "+".join(ordered)
 
-    exists = run("git", "ls-remote", "--exit-code", "--heads", "origin", branch, check=False)
-    if exists.returncode == 0:
-        print(f"branch {branch} already exists, skipping (a PR is presumably already open)")
-        return
+    existing_pr = find_open_pr(branch)
+
+    if existing_pr:
+        run("git", "fetch", "origin", branch, check=False)
+        already_current = all(
+            branch_file_version(branch, str(dirty[name]["entry"]["toml_path"].relative_to(registry_root))) == dirty[name]["new_version"]
+            for name in ordered
+        )
+        if already_current:
+            print(f"branch {branch} (PR #{existing_pr['number']}) is already at the latest versions, nothing to do")
+            return
+        print(f"branch {branch} (PR #{existing_pr['number']}) exists but is stale — force-updating it in place")
+    else:
+        print(f"opening a new PR for {branch}")
 
     run("git", "checkout", BASE_BRANCH)
+    run("git", "branch", "-D", branch, check=False)
     run("git", "checkout", "-b", branch)
 
     try:
@@ -66,16 +105,20 @@ def process_group(group: set[str], dirty: dict[str, dict], depends_on: dict[str,
             run("git", "commit", "-m", subject)
             pr_body_lines.append(f"- `{subject}` — https://aur.archlinux.org/packages/{d['entry']['pkgbase']}")
 
-        run("git", "push", "origin", branch)
+        run("git", "push", "--force", "origin", branch)
 
         if len(ordered) == 1:
             title = f"{ordered[0]}: update to {dirty[ordered[0]]['new_version']}"
         else:
             title = "; ".join(f"{n}: update to {dirty[n]['new_version']}" for n in ordered)
+        body = "\n".join(pr_body_lines)
 
-        pr = run("gh", "pr", "create", "--title", title, "--body", "\n".join(pr_body_lines),
-                  "--head", branch, "--base", BASE_BRANCH)
-        print(pr.stdout.strip())
+        if existing_pr:
+            run("gh", "pr", "edit", str(existing_pr["number"]), "--title", title, "--body", body)
+            print(f"updated PR #{existing_pr['number']} ({branch})")
+        else:
+            pr = run("gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", BASE_BRANCH)
+            print(pr.stdout.strip())
     except (subprocess.CalledProcessError, RuntimeError) as exc:
         print(f"::error::failed to prepare PR for {branch}: {exc}", file=sys.stderr)
     finally:
@@ -87,8 +130,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--registry-root", required=True, type=pathlib.Path)
     args = ap.parse_args()
+    registry_root = args.registry_root.resolve()
 
-    entries = aur_graph.load_registry(args.registry_root)
+    entries = aur_graph.load_registry(registry_root)
     candidates = [e for e in entries if e["autoupdate"] and e["enabled"]]
 
     if not candidates:
@@ -119,7 +163,7 @@ def main() -> int:
     depends_on = aur_graph.build_graph(dirty_entries, aur_info)
 
     for group in aur_graph.connected_components(set(dirty), depends_on):
-        process_group(group, dirty, depends_on)
+        process_group(group, dirty, depends_on, registry_root)
 
     return 0
 
