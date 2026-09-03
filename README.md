@@ -85,7 +85,7 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `aur/check_version.sh` | Look up one pkgbase's latest version on AUR |
 | `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open/force-update PRs, enable auto-merge on them |
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
-| `publish/minio.sh` | GPG-sign, `repo-add`, upload to R2, prune files beyond the newest 3 versions |
+| `publish/minio.sh` | GPG-sign, `repo-add`, upload to R2, prune files beyond the newest version (`KEEP_VERSIONS`, default 1) |
 | `publish/publish_all.sh` | Orchestrates the whole `publish` job: install `mc`, import the GPG key once, loop over built packages calling `minio.sh`, assemble `built_packages.json`. Must run inside `archlinux:base-devel` (`repo-add`/`vercmp` ship with `pacman` itself — nothing to install on a bare Ubuntu runner) |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |
 | `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment |

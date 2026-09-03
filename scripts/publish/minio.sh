@@ -10,17 +10,17 @@ set -x
 
 # Publishes one already-built package to the MinIO-backed pacman repo (GPG
 # signing it along the way), then deletes old *files* of that same package
-# beyond the newest 3. A pacman repo db only ever points at ONE version per
-# pkgname — repo-add replaces the previous entry outright — so "keep 3
-# versions" is purely about leaving old package files downloadable for
-# manual `pacman -U` downgrades, not about the db itself.
+# beyond the newest one. A pacman repo db only ever points at ONE version
+# per pkgname — repo-add replaces the previous entry outright — so this is
+# purely about not leaving stale package files (and R2 storage) behind,
+# not about the db itself.
 #
 # Usage: minio.sh <name> <pkg-file>
 # Required env: R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
 #               GPG_KEY_ID
 # Optional env: GPG_PASSPHRASE (empty/unset if the signing key itself has
 #               no passphrase — common for a key made just for CI use),
-#               REPO_NAME (default "akaere"), KEEP_VERSIONS (default 3),
+#               REPO_NAME (default "akaere"), KEEP_VERSIONS (default 1),
 #               DISTRO (default "archlinux")
 #
 # The bucket is laid out as <DISTRO>/<arch>/... rather than just <arch>/...
@@ -37,7 +37,7 @@ pkg_file="${2:?built package path required}"
 pkg_file="$(cd "$(dirname "$pkg_file")" && pwd)/$(basename "$pkg_file")"
 
 repo_name="${REPO_NAME:-akaere}"
-keep_versions="${KEEP_VERSIONS:-3}"
+keep_versions="${KEEP_VERSIONS:-1}"
 distro="${DISTRO:-archlinux}"
 alias_name="akaere-minio"
 remote="${alias_name}/${R2_BUCKET:?R2_BUCKET required}/${distro}/x86_64"

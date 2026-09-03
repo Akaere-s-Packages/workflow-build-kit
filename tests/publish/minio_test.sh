@@ -112,10 +112,16 @@ VERCMP
   set +e
   (
     cd "$tmp"
+    # KEEP_VERSIONS=3 here is deliberate and independent of the script's
+    # own default (1, as of 2026-09-03): this test's fixture (4 fake
+    # existing versions) and its expected removal/retry counts are about
+    # proving `retry mc rm` survives transient failures, not about
+    # asserting any particular retention count — pinning it keeps that
+    # arithmetic stable no matter what the script's default is.
     PATH="$tmp/bin:$PATH" \
       TEST_COUNTER_FILE="$tmp" TEST_MODE="$mode" \
       R2_ENDPOINT=https://r2.invalid R2_ACCESS_KEY_ID=id R2_SECRET_ACCESS_KEY=secret R2_BUCKET=bucket \
-      GPG_KEY_ID=key "$script" package package-4.0-1-x86_64.pkg.tar.zst
+      GPG_KEY_ID=key KEEP_VERSIONS=3 "$script" package package-4.0-1-x86_64.pkg.tar.zst
   ) >"$tmp/output" 2>&1
   local status=$?
   set -e
