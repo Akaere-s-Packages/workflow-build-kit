@@ -14,11 +14,11 @@ on:
   workflow_call:
     inputs:
       base-sha:
-        description: Ignored when rebuild-all is true.
+        description: Ignored unless this is a plain push (every other trigger below ignores it too).
         required: false
         type: string
       head-sha:
-        description: Ignored when rebuild-all is true.
+        description: Ignored unless this is a plain push (every other trigger below ignores it too).
         required: false
         type: string
       rebuild-all:
@@ -31,6 +31,22 @@ on:
         required: false
         type: boolean
         default: false
+      clean-only:
+        description: >-
+          Build nothing; just reconcile the published repo db against the
+          current Registry and remove anything the Registry no longer
+          tracks. Ignores base-sha/head-sha/rebuild-all/retry-failed.
+        required: false
+        type: boolean
+        default: false
+      package-names:
+        description: >-
+          Comma/whitespace-separated package names to build and republish,
+          ignoring base-sha/head-sha/rebuild-all/retry-failed/clean-only.
+          Each name must already exist in the Registry.
+        required: false
+        type: string
+        default: ""
     secrets:
       R2_ENDPOINT:
         required: true
@@ -83,8 +99,44 @@ jobs:
       - id: detect
         env:
           GH_TOKEN: ${{ github.token }}
+          # Piped through env rather than interpolated straight into the
+          # script below (unlike the boolean/SHA inputs elsewhere in this
+          # step): this one is free-form text a human types into the
+          # workflow_dispatch form, and splicing that directly into `${{
+          # }}` inside a run: script is exactly the classic GitHub Actions
+          # script-injection hole — the expression is substituted as raw
+          # text before bash ever parses it. Reading it back out of the
+          # environment at runtime instead means its content is just a
+          # string value, never executed as script.
+          PACKAGE_NAMES: ${{ inputs.package-names }}
         run: |
-          if [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
+          if [[ -n "$PACKAGE_NAMES" ]]; then
+            # Accept commas and/or any whitespace as separators so
+            # "pkg-a, pkg-b" and "pkg-a pkg-b" both work from the
+            # workflow_dispatch text box.
+            requested="$(printf '%s' "$PACKAGE_NAMES" | tr ',' '\n' | tr -s '[:space:]' '\n' | sed '/^$/d' | sort -u)"
+            if [[ -z "$requested" ]]; then
+              echo "::error::package-names ('$PACKAGE_NAMES') contained no usable package name after parsing" >&2
+              exit 1
+            fi
+            printf '%s\n' "$requested" | jq -R . | jq -s . > names.json
+            .build-kit/scripts/registry/detect_changed_packages.sh --names names.json > changed.json
+            resolved="$(jq -r '.[].name' changed.json | sort -u)"
+            missing="$(comm -23 <(printf '%s\n' "$requested") <(printf '%s\n' "$resolved") || true)"
+            if [[ -n "$missing" ]]; then
+              echo "::warning::requested package name(s) not found in the registry, skipped: $(tr '\n' ' ' <<< "$missing")"
+            fi
+            removed_count=0
+          elif [[ "${{ inputs.clean-only }}" == "true" ]]; then
+            # Nothing to build — resolve_build_order.py (called next, in
+            # the `resolve` step) treats an empty changed set as "produce
+            # all-empty layers" with no AUR lookup at all, so this alone is
+            # enough to skip every build-wave-* job. removed-count stays 0
+            # since there's no diff to count; the publish job's `if:` below
+            # has a dedicated `inputs.clean-only` branch to still run it.
+            echo '[]' > changed.json
+            removed_count=0
+          elif [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
             .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
             removed_count=0
           elif [[ "${{ inputs.retry-failed }}" == "true" ]]; then
@@ -516,7 +568,8 @@ jobs:
         needs.detect-changes.outputs.layer2 != '[]' ||
         needs.detect-changes.outputs.layer3 != '[]' ||
         needs.detect-changes.outputs.layer4 != '[]' ||
-        needs.detect-changes.outputs.removed-count != '0'
+        needs.detect-changes.outputs.removed-count != '0' ||
+        inputs.clean-only == true
       )
     runs-on: ubuntu-latest
     # repo-add performs a read-modify-write of the shared R2 repository DB.
