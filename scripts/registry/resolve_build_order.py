@@ -17,7 +17,7 @@ detect_changed_packages.sh), this:
 
 Usage:
   resolve_build_order.py --registry-root <path> --changed <json-file-or-'-'>
-                          [--max-layers 3]
+                          [--max-layers 5]
 
 --changed points at a JSON file with the same shape
 detect_changed_packages.sh prints (an array of {"distro","type","name","path"});
@@ -34,7 +34,7 @@ import urllib.error
 
 import aur_graph
 
-DEFAULT_MAX_LAYERS = 3
+DEFAULT_MAX_LAYERS = 5
 
 
 def main() -> int:

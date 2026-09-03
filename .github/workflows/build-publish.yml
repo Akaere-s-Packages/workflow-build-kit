@@ -63,6 +63,8 @@ jobs:
       layer0: ${{ steps.resolve.outputs.layer0 }}
       layer1: ${{ steps.resolve.outputs.layer1 }}
       layer2: ${{ steps.resolve.outputs.layer2 }}
+      layer3: ${{ steps.resolve.outputs.layer3 }}
+      layer4: ${{ steps.resolve.outputs.layer4 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,12 +86,12 @@ jobs:
         run: |
           # Expands the literally-changed set to everything hard-dependent
           # on it (e.g. bumping asusctl also pulls in rog-control-center,
-          # which depends on it) and lays the result out in up to 3
-          # dependency-ordered build layers ("waves"). Padded to exactly 3
-          # entries by resolve_build_order.py, so layer0/1/2 are always
+          # which depends on it) and lays the result out in up to 5
+          # dependency-ordered build layers ("waves"). Padded to exactly 5
+          # entries by resolve_build_order.py, so layer0..layer4 are always
           # valid — no need to guard against a shorter array.
           python3 .build-kit/scripts/registry/resolve_build_order.py \
-            --registry-root . --changed changed.json > layers.json
+            --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved build layers:"; cat layers.json
           # Bare assignments (not `echo "x=$(...)"`) so a genuine jq
           # failure trips `set -e` instead of silently writing an empty
@@ -97,10 +99,14 @@ jobs:
           layer0=$(jq -c '.[0]' layers.json)
           layer1=$(jq -c '.[1]' layers.json)
           layer2=$(jq -c '.[2]' layers.json)
+          layer3=$(jq -c '.[3]' layers.json)
+          layer4=$(jq -c '.[4]' layers.json)
           {
             echo "layer0=$layer0"
             echo "layer1=$layer1"
             echo "layer2=$layer2"
+            echo "layer3=$layer3"
+            echo "layer4=$layer4"
           } >> "$GITHUB_OUTPUT"
 
   build-wave-0:
@@ -315,6 +321,145 @@ jobs:
           path: out/
           if-no-files-found: warn
 
+  build-wave-3:
+    # Only needs build-wave-2 directly — GitHub still enforces the full
+    # chain transitively (build-wave-2 already needs build-wave-1, which
+    # already needs build-wave-0), so this correctly starts after all
+    # earlier waves regardless of whether any of them were skipped.
+    needs: [detect-changes, build-wave-2]
+    if: always() && needs.detect-changes.outputs.layer3 != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-changes.outputs.layer3) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - id: meta
+        run: |
+          # Assign to plain variables first, *then* echo them — a command
+          # substitution that fails inside `echo "key=$(...)"` directly
+          # does NOT trip `set -e` (echo itself still "succeeds"), so a
+          # genuine parse failure would otherwise be silently swallowed
+          # into an empty value instead of failing this step loudly.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          {
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: write manifest
+        if: always()
+        run: |
+          status="build_failed"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="built"
+          cat > out/manifest.json <<EOF
+          {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  build-wave-4:
+    # Only needs build-wave-3 directly — the full chain is enforced
+    # transitively the same way build-wave-3 is relative to the ones
+    # before it.
+    needs: [detect-changes, build-wave-3]
+    if: always() && needs.detect-changes.outputs.layer4 != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect-changes.outputs.layer4) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: registry
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: build-kit
+      - id: meta
+        run: |
+          # Assign to plain variables first, *then* echo them — a command
+          # substitution that fails inside `echo "key=$(...)"` directly
+          # does NOT trip `set -e` (echo itself still "succeeds"), so a
+          # genuine parse failure would otherwise be silently swallowed
+          # into an empty value instead of failing this step loudly.
+          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
+          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          {
+            echo "pkgbase=$pkgbase"
+            echo "aur_depends=$aur_depends"
+          } >> "$GITHUB_OUTPUT"
+      - name: build (inside archlinux:base-devel)
+        id: build
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
+            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: resolve job url
+        id: jobinfo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const job = data.jobs.find(j => j.name.includes('${{ matrix.name }}'));
+            core.setOutput('url', job ? job.html_url
+              : `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+      - name: write manifest
+        if: always()
+        run: |
+          status="build_failed"
+          [[ "${{ steps.build.outcome }}" == "success" ]] && status="built"
+          cat > out/manifest.json <<EOF
+          {"distro":"${{ matrix.distro }}","type":"${{ matrix.type }}","name":"${{ matrix.name }}","pkgbase":"${{ steps.meta.outputs.pkgbase }}","build_outcome":"$status","job_url":"${{ steps.jobinfo.outputs.url }}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
   publish:
     # No `always()` needed on the build-wave-* dependency itself: an
     # individual package's build step uses continue-on-error, so each wave
@@ -322,12 +467,14 @@ jobs:
     # to build — that's what lets publish run and correctly mark just
     # those packages publish_failed. `always()` here is only to tolerate
     # empty (skipped) waves.
-    needs: [detect-changes, build-wave-0, build-wave-1, build-wave-2]
+    needs: [detect-changes, build-wave-0, build-wave-1, build-wave-2, build-wave-3, build-wave-4]
     if: |
       always() && (
         needs.detect-changes.outputs.layer0 != '[]' ||
         needs.detect-changes.outputs.layer1 != '[]' ||
-        needs.detect-changes.outputs.layer2 != '[]'
+        needs.detect-changes.outputs.layer2 != '[]' ||
+        needs.detect-changes.outputs.layer3 != '[]' ||
+        needs.detect-changes.outputs.layer4 != '[]'
       )
     runs-on: ubuntu-latest
     # repo-add performs a read-modify-write of the shared R2 repository DB.
