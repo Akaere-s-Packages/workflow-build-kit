@@ -122,4 +122,21 @@ make_entry="$(jq -c '.dependencies[] | select(.name == "cmake")' <<<"$meta")"
 
 [[ "$(jq -r '.dependencies | length' <<<"$meta")" == "4" ]] || fail "expected exactly 4 classified dependencies: $meta"
 
+# --- regression guard: jq must actually be installed by this script
+# before its own logic pipes through it. A real CI run caught this once
+# already — the file_list.json/build_meta.json generation above was
+# rewritten from python3 heredocs to bash|awk|jq, but the script's own
+# `pacman -Sy --needed ...` line was never updated to install jq, so it
+# worked in every local test (this machine already has jq) and failed
+# outright the first time it ran in the real, bare archlinux:base-devel
+# container with "jq: command not found". The tests above only exercise
+# the tail of build.sh (sed-extracted, past the install line) so they
+# can't catch this class of gap themselves — this checks the actual
+# install line statically instead. ---
+build_sh="$repo_root/backends/archlinux/build.sh"
+grep -qE '\| ?jq\b|jq -' "$build_sh" || fail "build.sh no longer appears to use jq — if that's deliberate, this guard can go too"
+install_line="$(grep -E '^\s*retry pacman -Sy .*--needed' "$build_sh")"
+[[ -n "$install_line" ]] || fail "couldn't find build.sh's pacman -Sy --needed install line at all"
+echo "$install_line" | grep -qw jq || fail "build.sh uses jq but its own 'pacman -Sy --needed' line doesn't install it: $install_line"
+
 echo "backends/archlinux/build.sh file_list/build_meta tests passed"

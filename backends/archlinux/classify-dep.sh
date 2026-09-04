@@ -100,7 +100,18 @@ if [[ "$cache_fresh" != true ]]; then
     # possibly version-constrained like "cargo=1.98.0") — collect both,
     # stripping any version constraint off provides entries the same way
     # every other dependency-name field in this project is stripped.
-    bsdtar -xOf "$db_file" --include '*/desc' 2>/dev/null | awk '
+    #
+    # GNU tar, not bsdtar: this script runs on the plain ubuntu-latest
+    # host (dependency resolution happens before any Arch container is
+    # ever started), and bsdtar isn't part of that runner image's default
+    # toolset the way it is inside archlinux:base-devel (where it's
+    # pulled in as a pacman/libarchive dependency) — confirmed absent
+    # from GitHub's own runner-image manifest. GNU tar is unconditionally
+    # present on any Linux runner and reads the exact same .db.tar.gz
+    # format; --wildcards enables the glob pattern, -O extracts to
+    # stdout — verified byte-for-byte identical output against bsdtar on
+    # a real core.db before switching.
+    tar -xzf "$db_file" --wildcards -O '*/desc' 2>/dev/null | awk '
       function strip_constraint(s) {
         split(s, a, /(>=|<=|=|>|<)/)
         return a[1]

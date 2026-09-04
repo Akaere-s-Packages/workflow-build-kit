@@ -54,7 +54,13 @@ retry() {
   done
 }
 
-retry pacman -Sy --noconfirm --needed git
+# jq: not part of base-devel or the base archlinux image — needed here
+# (unlike the rest of this script's coreutils/awk/bsdtar, all already
+# present) because the file_list.json/build_meta.json generation below
+# pipes through it. A real CI run caught this the first time: "jq:
+# command not found" at the bsdtar|awk|jq step, since the old Python
+# heredocs this replaced never needed it installed explicitly.
+retry pacman -Sy --noconfirm --needed git jq
 
 if ! id builder &>/dev/null; then
   useradd -m builder
