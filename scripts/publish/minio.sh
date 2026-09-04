@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Trace every command by default (see build/package.sh for why). Unlike
-# that script, this one DOES handle secrets (R2 keys, GPG passphrase) — the
-# lines that pass them as literal CLI args are individually wrapped in
-# `set +x`/`set -x` (in repo_lib.sh) so their values never reach the trace
-# output at all. Don't rely solely on GitHub's log redaction for that; this
-# script can also be run locally with real secrets in the environment.
+# Trace every command by default (see backends/archlinux/build.sh for
+# why). Unlike that script, this one DOES handle secrets (R2 keys, GPG
+# passphrase) — the lines that pass them as literal CLI args are
+# individually wrapped in `set +x`/`set -x` (in repo_lib.sh) so their
+# values never reach the trace output at all. Don't rely solely on
+# GitHub's log redaction for that; this script can also be run locally
+# with real secrets in the environment.
 set -x
 
 # Publishes one already-built package to the MinIO-backed pacman repo (GPG
@@ -28,7 +29,8 @@ set -x
 # Optional env: GPG_PASSPHRASE (empty/unset if the signing key itself has
 #               no passphrase — common for a key made just for CI use),
 #               REPO_NAME (default "akaere"), KEEP_VERSIONS (default 1),
-#               DISTRO (default "archlinux")
+#               DISTRO (default "archlinux" — also selects which
+#               backends/<DISTRO>/repo_lib.sh gets sourced)
 #
 # The bucket is laid out as <DISTRO>/<arch>/... rather than just <arch>/...
 # at the root, because this MinIO bucket is meant to eventually host more
@@ -50,7 +52,9 @@ alias_name="akaere-minio"
 bucket="${R2_BUCKET:?R2_BUCKET required}"
 remote="${alias_name}/${bucket}/${distro}/x86_64"
 
-source "$(dirname "${BASH_SOURCE[0]}")/repo_lib.sh"
+script_dir="$(dirname "${BASH_SOURCE[0]}")"
+source "$script_dir/repo_lib.sh"
+source "$script_dir/../../backends/$distro/repo_lib.sh"
 
 mc_alias_set
 

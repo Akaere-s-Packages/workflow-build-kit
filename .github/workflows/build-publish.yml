@@ -2,7 +2,7 @@ name: build-publish
 
 # Called by Registry's own push-to-main workflow after a PR merges. Builds
 # every changed package (plus anything hard-dependent on it, in dependency
-# order — see scripts/registry/resolve_build_order.py), GPG-signs and
+# order — see scripts/registry/resolve_build_order.sh), GPG-signs and
 # publishes the successful ones to the R2-backed pacman repo, refreshes
 # WebSite-Kit's data, updates Registry/README.md, and opens/closes
 # per-package failure Issues on Registry.
@@ -134,7 +134,7 @@ jobs:
             fi
             removed_count=0
           elif [[ "${{ inputs.clean-only }}" == "true" ]]; then
-            # Nothing to build — resolve_build_order.py (called next, in
+            # Nothing to build — resolve_build_order.sh (called next, in
             # the `resolve` step) treats an empty changed set as "produce
             # all-empty layers" with no AUR lookup at all, so this alone is
             # enough to skip every build-wave-* job. removed-count stays 0
@@ -166,15 +166,17 @@ jobs:
           echo "changed packages:"; cat changed.json
           echo "removed toml count: $removed_count"
           echo "removed-count=$removed_count" >> "$GITHUB_OUTPUT"
+      - name: build depgraph
+        run: make -C .build-kit/tools/depgraph
       - id: resolve
         run: |
           # Expands the literally-changed set to everything hard-dependent
           # on it (e.g. bumping asusctl also pulls in rog-control-center,
           # which depends on it) and lays the result out in up to 5
           # dependency-ordered build layers ("waves"). Padded to exactly 5
-          # entries by resolve_build_order.py, so layer0..layer4 are always
+          # entries by resolve_build_order.sh, so layer0..layer4 are always
           # valid — no need to guard against a shorter array.
-          python3 .build-kit/scripts/registry/resolve_build_order.py \
+          .build-kit/scripts/registry/resolve_build_order.sh \
             --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved build layers:"; cat layers.json
           # Bare assignments (not `echo "x=$(...)"`) so a genuine jq
@@ -224,8 +226,10 @@ jobs:
           # does NOT trip `set -e` (echo itself still "succeeds"), so a
           # genuine parse failure would otherwise be silently swallowed
           # into an empty value instead of failing this step loudly.
-          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
-          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          source build-kit/scripts/lib/toml.sh
+          pkgbase="$(toml_get "registry/${{ matrix.path }}" pkgbase)"
+          [[ -z "$pkgbase" ]] && pkgbase="${{ matrix.name }}"
+          aur_depends="$(toml_get_list "registry/${{ matrix.path }}" aur_depends)"
           {
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
@@ -235,8 +239,12 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
-            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+            bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -261,7 +269,7 @@ jobs:
           EOF
       - name: stage artifact filenames
         if: always()
-        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
+        run: bash build-kit/scripts/build/stage_artifact.sh stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -296,8 +304,10 @@ jobs:
           # does NOT trip `set -e` (echo itself still "succeeds"), so a
           # genuine parse failure would otherwise be silently swallowed
           # into an empty value instead of failing this step loudly.
-          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
-          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          source build-kit/scripts/lib/toml.sh
+          pkgbase="$(toml_get "registry/${{ matrix.path }}" pkgbase)"
+          [[ -z "$pkgbase" ]] && pkgbase="${{ matrix.name }}"
+          aur_depends="$(toml_get_list "registry/${{ matrix.path }}" aur_depends)"
           {
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
@@ -307,8 +317,12 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
-            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+            bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -333,7 +347,7 @@ jobs:
           EOF
       - name: stage artifact filenames
         if: always()
-        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
+        run: bash build-kit/scripts/build/stage_artifact.sh stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -369,8 +383,10 @@ jobs:
           # does NOT trip `set -e` (echo itself still "succeeds"), so a
           # genuine parse failure would otherwise be silently swallowed
           # into an empty value instead of failing this step loudly.
-          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
-          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          source build-kit/scripts/lib/toml.sh
+          pkgbase="$(toml_get "registry/${{ matrix.path }}" pkgbase)"
+          [[ -z "$pkgbase" ]] && pkgbase="${{ matrix.name }}"
+          aur_depends="$(toml_get_list "registry/${{ matrix.path }}" aur_depends)"
           {
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
@@ -380,8 +396,12 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
-            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+            bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -406,7 +426,7 @@ jobs:
           EOF
       - name: stage artifact filenames
         if: always()
-        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
+        run: bash build-kit/scripts/build/stage_artifact.sh stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -442,8 +462,10 @@ jobs:
           # does NOT trip `set -e` (echo itself still "succeeds"), so a
           # genuine parse failure would otherwise be silently swallowed
           # into an empty value instead of failing this step loudly.
-          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
-          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          source build-kit/scripts/lib/toml.sh
+          pkgbase="$(toml_get "registry/${{ matrix.path }}" pkgbase)"
+          [[ -z "$pkgbase" ]] && pkgbase="${{ matrix.name }}"
+          aur_depends="$(toml_get_list "registry/${{ matrix.path }}" aur_depends)"
           {
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
@@ -453,8 +475,12 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
-            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+            bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -479,7 +505,7 @@ jobs:
           EOF
       - name: stage artifact filenames
         if: always()
-        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
+        run: bash build-kit/scripts/build/stage_artifact.sh stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -514,8 +540,10 @@ jobs:
           # does NOT trip `set -e` (echo itself still "succeeds"), so a
           # genuine parse failure would otherwise be silently swallowed
           # into an empty value instead of failing this step loudly.
-          pkgbase=$(python3 -c "import tomllib; print(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('pkgbase','${{ matrix.name }}'))")
-          aur_depends=$(python3 -c "import tomllib; print(' '.join(tomllib.load(open('registry/${{ matrix.path }}','rb'))['PACKAGES'].get('aur_depends',[])))")
+          source build-kit/scripts/lib/toml.sh
+          pkgbase="$(toml_get "registry/${{ matrix.path }}" pkgbase)"
+          [[ -z "$pkgbase" ]] && pkgbase="${{ matrix.name }}"
+          aur_depends="$(toml_get_list "registry/${{ matrix.path }}" aur_depends)"
           {
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
@@ -525,8 +553,12 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel \
-            bash build-kit/scripts/build/package.sh "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+            bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -551,7 +583,7 @@ jobs:
           EOF
       - name: stage artifact filenames
         if: always()
-        run: python3 build-kit/scripts/build/stage_artifact.py stage out artifact
+        run: bash build-kit/scripts/build/stage_artifact.sh stage out artifact
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -602,7 +634,7 @@ jobs:
         run: |
           for artifact_dir in artifacts/build-*/; do
             [[ -d "$artifact_dir" ]] || continue
-            python3 build-kit/scripts/build/stage_artifact.py restore "$artifact_dir"
+            bash build-kit/scripts/build/stage_artifact.sh restore "$artifact_dir"
           done
       - name: sign, publish, and assemble final manifest (inside archlinux:base-devel)
         # repo-add/vercmp are part of the `pacman` package itself — there's
@@ -679,16 +711,11 @@ jobs:
           path: artifacts
       - name: rewrite artifact_dir to this job's download path
         run: |
-          python3 - <<'PY'
-          import json
-          data = json.load(open("built_packages.json"))
-          for e in data:
-              e["artifact_dir"] = f"artifacts/build-{e['name']}"
-          json.dump(data, open("built_packages.json", "w"), indent=2)
-          PY
+          jq '[.[] | .artifact_dir = "artifacts/build-" + .name]' built_packages.json > built_packages.json.new
+          mv built_packages.json.new built_packages.json
       - name: generate website data
         run: |
-          python3 build-kit/scripts/website/gen_data.py \
+          bash build-kit/scripts/website/gen_data.sh \
             --registry-root registry \
             --website-data-dir website-kit/src/_data \
             --built built_packages.json
@@ -728,7 +755,7 @@ jobs:
           path: website-kit
       - name: regenerate README package table
         run: |
-          python3 build-kit/scripts/registry/update_readme.py \
+          bash build-kit/scripts/registry/update_readme.sh \
             --registry-root registry \
             --website-data-dir website-kit/src/_data \
             --pages-domain "${{ env.PAGES_DOMAIN }}"

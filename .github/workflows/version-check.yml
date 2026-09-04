@@ -1,8 +1,9 @@
 name: version-check
 
 # Called on a daily cron by Registry. Checks every autoupdate=true package
-# against AUR's live version and opens a PR per group of related updates —
-# see scripts/aur/check_updates.py for the grouping/commit logic (packages
+# against its own backends/<distro>/fetch-info.sh for a newer upstream
+# version and opens a PR per group of related updates — see
+# scripts/update/check_updates.sh for the grouping/commit logic (packages
 # that hard-depend on each other and are both out of date land in one PR,
 # each as its own commit following the AOSC packaging commit convention;
 # unrelated updates get their own PR). Each PR this opens then triggers
@@ -30,10 +31,13 @@ jobs:
           ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
           path: .build-kit
 
-      - name: check for AUR updates and open PRs
+      - name: build depgraph
+        run: make -C .build-kit/tools/depgraph
+
+      - name: check for upstream updates and open PRs
         env:
           GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
         run: |
           git config user.name "Lilithya"
           git config user.email "me@lilithya.su"
-          python3 .build-kit/scripts/aur/check_updates.py --registry-root .
+          .build-kit/scripts/update/check_updates.sh --registry-root .

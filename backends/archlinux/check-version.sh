@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prints the latest Version (pkgver-pkgrel, as AUR itself reports it) for a
-# pkgbase, or exits 1 if AUR has no such package.
+# archlinux backend: prints the latest Version (pkgver-pkgrel, as AUR
+# itself reports it) for a pkgbase, or exits 1 if AUR has no such package.
+# Part of the backends/<distro>/ contract (see backends/README.md) — every
+# distro backend must provide a check-version.sh with this same interface.
 #
-# Usage: check_version.sh <pkgbase>
+# Usage: check-version.sh <pkgbase>
 
 pkgbase="${1:?pkgbase required}"
 

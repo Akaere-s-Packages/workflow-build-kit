@@ -3,9 +3,9 @@ name: merge-queue
 # Called by Registry after every pr-preview/build-and-publish run
 # completes (either could make a bump/* PR newly ready, or free up the
 # queue by finishing) plus on workflow_dispatch for manual recovery.
-# Merges at most one ready bump/* autoPR (see scripts/aur/check_updates.py)
+# Merges at most one ready bump/* autoPR (see scripts/update/check_updates.sh)
 # per invocation, and only once this repo's Actions are completely idle —
-# see scripts/aur/merge_queue.py for the full rule set and rationale.
+# see scripts/update/merge_queue.sh for the full rule set and rationale.
 
 on:
   workflow_call:
@@ -39,4 +39,4 @@ jobs:
       - name: drain one PR from the merge queue
         env:
           GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
-        run: python3 .build-kit/scripts/aur/merge_queue.py
+        run: bash .build-kit/scripts/update/merge_queue.sh

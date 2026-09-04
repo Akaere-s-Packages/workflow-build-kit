@@ -1,21 +1,18 @@
-#!/usr/bin/env bash
-# Shared functions for publishing to the R2-backed pacman repo. Sourced by
-# both minio.sh (publishes exactly one package, downloads/uploads the repo
-# db around it — the standalone, run-outside-a-workflow path) and
-# publish_all.sh (publishes a whole batch: signs and `repo-add`s every
-# package into ONE local db, then uploads that db exactly once at the end,
-# instead of every package in the batch doing its own full download/upload
-# round-trip of files every other package in the same run already touched).
+# Shared, distro-agnostic S3 (via `mc`) publish primitives. Sourced, not
+# run standalone — by both minio.sh (publishes exactly one package,
+# downloads/uploads the repo db around it) and publish_all.sh (publishes a
+# whole batch). Neither script, nor this file, ever invokes repo-add/
+# repo-remove/vercmp or anything else that only exists for pacman
+# specifically — that lives entirely in backends/<distro>/repo_lib.sh,
+# which callers source separately (see minio.sh, and the per-distro loop
+# in publish_all.sh) once they know which distro they're publishing for.
+# This split is what makes adding a second distro's repo format (a
+# Debian-style apt-ftparchive/reprepro backend, say) a matter of adding a
+# new backends/<distro>/repo_lib.sh, not touching this file or its callers.
 #
-# Callers must set these globals before calling anything here:
-#   repo_name, distro, alias_name, remote, db_file, files_file
-# (see minio.sh / publish_all.sh for the exact derivation — identical in
-# both). GPG_KEY_ID/GPG_PASSPHRASE and the R2_* secrets are read directly
-# from the environment, same as before this was split out. A caller using
-# prune_removed_packages must also pre-declare `any_pruned=false` — that
-# function sets it (deliberately not `local`) when it actually removes
-# something, the same caller-owned-global convention as the rest of this
-# list.
+# Callers must set `alias_name`/`remote`/`bucket` before calling anything
+# here (see minio.sh / publish_all.sh for the exact derivation — identical
+# in both).
 
 retry() {
   local attempts=3 delay=5 n=1
@@ -74,103 +71,14 @@ download_metadata_file() {
   done
 }
 
-download_metadata_pair() {
-  local db_state files_state status
-
-  if download_metadata_file "$remote/$db_file" .; then
-    db_state=present
-  else
-    status=$?
-    case "$status" in
-      2) db_state=missing ;;
-      *) return "$status" ;;
-    esac
-  fi
-
-  if download_metadata_file "$remote/$files_file" .; then
-    files_state=present
-  else
-    status=$?
-    case "$status" in
-      2) files_state=missing ;;
-      *) return "$status" ;;
-    esac
-  fi
-
-  if [[ "$db_state" != "$files_state" ]]; then
-    echo "::error::incomplete remote repository metadata: $db_file is $db_state, $files_file is $files_state" >&2
-    return 1
-  fi
-  if [[ "$db_state" == missing ]]; then
-    echo "repository metadata is absent; creating the initial repository" >&2
-  fi
-}
-
-# GPG-signs one already-copied-into-cwd package file and folds it into the
-# LOCAL db_file/files_file — purely local, no upload. Caller must have
-# already `cp`'d pkg_basename into the cwd first.
-#
-# Both steps' exit statuses are checked explicitly rather than left to
-# `set -e` to catch — this function is called as an `if` condition in
-# publish_all.sh's batched path (`if sign_and_add ... && upload_package_file
-# ...; then`), and bash's documented `set -e` behavior is that a compound
-# command executing in a context where -e is being ignored (an if
-# condition, here) makes -e ignored for EVERY command run inside it too —
-# so without an explicit check, a failed gpg signature here would silently
-# fall through to repo-add, and if repo-add itself happened to still
-# succeed (it doesn't care about the per-package .sig file this step
-# produces), the whole function would incorrectly report success.
-sign_and_add() {
-  local pkg_basename="$1" status
-  # GPG_PASSPHRASE is optional: a signing key made specifically for
-  # unattended CI use commonly has no passphrase at all. `--passphrase ""`
-  # is the correct non-interactive way to sign with such a key — it's not
-  # "no passphrase given", it's "the passphrase is the empty string", which
-  # is what an unprotected private key actually expects.
-  set +x  # never trace the passphrase itself
-  gpg --batch --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
-    --detach-sign --local-user "${GPG_KEY_ID:?}" "$pkg_basename"
-  status=$?
-  set -x
-  (( status == 0 )) || return "$status"
-  repo-add -s -k "$GPG_KEY_ID" "$db_file" "$pkg_basename"
-}
-
-# Uploads one already-signed-and-added package's own file + signature.
+# Uploads one already-signed-and-indexed package's own file + signature.
 # Always per-package (there's nothing to batch here — every package's
-# bytes are unique) — unlike upload_repo below, which is the part worth
-# not repeating once per package in a batch.
+# bytes are unique) — unlike a repo-index upload (backends/<distro>/
+# repo_lib.sh's upload_repo), which is the part worth not repeating once
+# per package in a batch.
 upload_package_file() {
   local pkg_basename="$1" sig_basename="$2"
   retry mc cp "$pkg_basename" "$sig_basename" "$remote/"
-}
-
-# Uploads the current LOCAL db/files (+ signature, + extensionless aliases)
-# to R2. Call this exactly once after every package in a batch has gone
-# through sign_and_add — not once per package — since it's the same six
-# objects each time regardless of how many packages fed into the db.
-#
-# Chained with `&&`, not six bare statements: this is called as an `if`
-# condition in publish_all.sh (`if upload_repo; then`), and per bash's
-# documented `set -e` semantics, a compound command running where -e is
-# ignored (an if condition) makes -e ignored for every command inside it —
-# so without the explicit chain, an early upload failing here would still
-# let later ones run, and the function would report success as long as the
-# LAST of the six happened to succeed, silently losing the earlier failure.
-upload_repo() {
-  retry mc cp "$db_file" "$remote/$db_file" &&
-  retry mc cp "$files_file" "$remote/$files_file" &&
-  retry mc cp "${db_file}.sig" "$remote/${db_file}.sig" &&
-  # pacman's default `Server = .../x86_64` + `[reponame]` setup actually
-  # requests the EXTENSIONLESS name (reponame.db), not reponame.db.tar.gz —
-  # the .tar.gz name is the "real" file, .db/.files are traditionally a
-  # symlink to it on real mirrors. S3 has no symlinks, so we upload the same
-  # bytes twice. Critically, the signature needs the same treatment: without
-  # reponame.db.sig, `SigLevel = Required` fails signature verification the
-  # moment a client fetches reponame.db instead of reponame.db.tar.gz.
-  retry mc cp "$db_file" "$remote/${repo_name}.db" &&
-  retry mc cp "${db_file}.sig" "$remote/${repo_name}.db.sig" &&
-  retry mc cp "$files_file" "$remote/${repo_name}.files"
 }
 
 # Publishes the signing key's own ASCII-armored public key to the BUCKET
@@ -188,139 +96,4 @@ upload_repo() {
 upload_public_key() {
   gpg --export --armor "${GPG_KEY_ID:?}" > "${repo_name}.gpg"
   retry mc cp "${repo_name}.gpg" "${alias_name}/${bucket:?}/${repo_name}.gpg"
-}
-
-# --- retention: keep only the newest $2 *files* for package $1 ---
-# A failed listing here just means this run's cleanup is skipped (`|| true`
-# below) rather than the whole publish failing — the package is already
-# safely up (and, in the db), and the next successful run will catch up on
-# retention. Still worth a retry first since it's cheap.
-#
-# The filter below requires *exactly* three more hyphen-free tokens after
-# "$name-" — [epoch:]pkgver, pkgrel, and arch — rather than a naive
-# `.+-x86_64` glob. Two real reasons, not just tidiness:
-#   1. arch isn't always x86_64 — an arch=(any) package (fonts, pure-data
-#      packages: noto-fonts-sc is one right now) produces .../<pkgrel>-any.pkg.tar.zst,
-#      which a hardcoded suffix simply never matches, silently disabling
-#      retention for every such package.
-#   2. `.+` is greedy enough to also match a DIFFERENT, longer package's
-#      files whenever one tracked name is a literal prefix of another —
-#      samsung-unified-driver-{common,printer,scanner} are exactly that
-#      relative to samsung-unified-driver. Since pkgver/pkgrel/arch can
-#      never themselves contain a hyphen (only [epoch:]pkgver can contain a
-#      colon), requiring exactly three hyphen-free trailing tokens is enough
-#      to reject "samsung-unified-driver-common-1.00.39-11-x86_64..." when
-#      pruning plain "samsung-unified-driver" (that remainder splits into
-#      four tokens, not three) — a looser pattern would quietly treat one
-#      package's files as another's stale versions and delete them.
-prune_old_versions() {
-  local name="$1" keep_versions="$2"
-  local existing f v placed i
-
-  list_versions() { mc ls "$remote/"; }
-  existing="$(retry list_versions | awk '{print $NF}' | grep -E "^${name}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$" || true)"
-
-  local versions=()
-  local -A file_for_version=()
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    if [[ "$f" =~ ^${name}-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]]; then
-      v="${BASH_REMATCH[1]}"
-      versions+=("$v")
-      file_for_version["$v"]="$f"
-    fi
-  done <<< "$existing"
-
-  # Insertion-sort descending by vercmp (newest first). Small N, O(n^2) is fine.
-  local sorted=()
-  for v in "${versions[@]}"; do
-    placed=false
-    for i in "${!sorted[@]}"; do
-      if (( $(vercmp "$v" "${sorted[$i]}") > 0 )); then
-        sorted=("${sorted[@]:0:$i}" "$v" "${sorted[@]:$i}")
-        placed=true
-        break
-      fi
-    done
-    [[ $placed == true ]] || sorted+=("$v")
-  done
-
-  for v in "${sorted[@]:$keep_versions}"; do
-    local stale="${file_for_version[$v]}"
-    echo "pruning old version: $stale"
-    if ! retry mc rm "$remote/$stale" "$remote/${stale}.sig"; then
-      echo "::warning::could not prune $stale; retention will retry on the next publish" >&2
-    fi
-  done
-}
-
-# --- reconcile: remove packages the Registry no longer tracks at all ---
-# Unlike prune_old_versions (which keeps the newest N *versions* of a
-# package the Registry still lists), this removes a package ENTIRELY once
-# its Registry entry is gone — repo-remove's the db entry and deletes every
-# remaining file for it in R2.
-#
-# Takes $1 as a newline-separated list of every pkgname the Registry
-# currently tracks FOR THIS DISTRO (the caller derives it straight from the
-# checked-out Registry tree, e.g. `registry/$distro/*/*/*.toml` basenames —
-# not from this run's git diff). That's deliberate: comparing current
-# Registry state against current db state is a reconciliation, not a diff
-# against history, so it self-heals a package left behind by ANY prior
-# gap (a squash-merged deletion, a rebuild-all run, the exact class of bug
-# detect_changed_packages.sh's --diff-filter=d fixes) on the very next
-# ordinary publish — not just one caused by this specific run's changes.
-#
-# Safety-critical: an empty $1 almost always means a broken/missing
-# Registry checkout, NOT "the registry is genuinely empty" (this project
-# has never shipped zero packages). Since the whole point of this function
-# is to delete anything NOT in that list, treating an empty list as
-# legitimate would repo-remove and delete every single package in the
-# repo. Refuse instead.
-#
-# Sets the caller's `any_pruned=true` (like this file's other functions,
-# not declared `local` here — see the module comment at the top) the
-# moment anything actually gets repo-removed, so the caller knows the LOCAL
-# db changed and is worth uploading even when nothing was staged to build.
-prune_removed_packages() {
-  local desired="$1"
-  local db_names name stale f
-
-  if [[ -z "${desired//[$'\n\t ']/}" ]]; then
-    echo "::error::refusing to reconcile the repo db: desired package list is empty (Registry checkout likely broken/missing) — this would delete every published package" >&2
-    return 1
-  fi
-
-  # A db that doesn't exist yet (first-ever publish for this distro) has
-  # nothing to reconcile against.
-  [[ -f "$db_file" ]] || return 0
-
-  # Read pkgname from each entry's %NAME% field rather than splitting the
-  # db's own "<name>-<pkgver>-<pkgrel>" directory names — sidesteps the
-  # exact hyphen/epoch-colon ambiguity prune_old_versions above has to
-  # work around with a careful regex, since the field is unambiguous.
-  db_names="$(bsdtar -xOf "$db_file" --include '*/desc' 2>/dev/null | awk '/^%NAME%$/{getline; print}' | sort -u)"
-
-  while IFS= read -r name; do
-    [[ -z "$name" ]] && continue
-    grep -qxF "$name" <<< "$desired" && continue
-
-    echo "removing package no longer in the Registry: $name"
-    if ! repo-remove -s -k "$GPG_KEY_ID" "$db_file" "$name"; then
-      echo "::warning::repo-remove failed for $name; it will remain in the db until a future publish retries this" >&2
-      continue
-    fi
-    any_pruned=true
-
-    # Same 3-trailing-token shape prune_old_versions relies on
-    # ([epoch:]pkgver, pkgrel, arch) — removes every remaining version's
-    # package + signature, not just old ones, since the package is gone
-    # entirely.
-    stale="$(retry mc ls "$remote/" | awk '{print $NF}' | grep -E "^${name}-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst$" || true)"
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      if ! retry mc rm "$remote/$f" "$remote/${f}.sig"; then
-        echo "::warning::could not remove stale file for removed package $name: $f" >&2
-      fi
-    done <<< "$stale"
-  done <<< "$db_names"
 }

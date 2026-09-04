@@ -4,26 +4,30 @@ set -x
 
 # Runs inside archlinux:base-devel (see build-publish.yml's `publish` job,
 # which invokes this via `docker run` against the workspace checked out on
-# the ubuntu-latest host) rather than directly on the host runner. repo-add
-# and vercmp are shipped as part of the `pacman` package itself, not
-# something `apt-get` on Ubuntu has any equivalent of, and there's no
-# portable static binary for them worth fetching — the actual bug this
-# fixed: publish was silently assumed to run on the bare host, and blew up
-# with "repo-add: command not found" the first time a build made it this
-# far. One container for the whole job (not one `docker run` per package)
-# so the mc install and GPG import below only happen once, not once per
-# built package.
+# the ubuntu-latest host) rather than directly on the host runner — the
+# archlinux backend's repo-format tools (repo-add, vercmp; see
+# backends/archlinux/repo_lib.sh) are shipped as part of the `pacman`
+# package itself, not something `apt-get` on Ubuntu has any equivalent of,
+# and there's no portable static binary for them worth fetching. This
+# script itself has no pacman-specific content at all — it only knows to
+# source backends/$distro/repo_lib.sh per distro in the batch (see the
+# per-distro loop below) — so it's the archlinux backend specifically,
+# not this script, that needs the container. One container for the whole
+# job (not one `docker run` per package) so the mc install and GPG import
+# below only happen once, not once per built package.
 #
-# Signs and `repo-add`s every successfully-built package into ONE local db
-# per distro, then uploads that db exactly once per distro — not once per
-# package. A real batch (verified against a 26-package run) otherwise
-# spends most of its wall-clock time re-fetching then re-uploading the same
-# few-KB db.tar.gz/.sig/.files objects over and over, once per package that
-# happens to publish successfully, even though every one of those round
-# trips after the first is redundant: nothing outside this run's own
-# packages could have changed the db in between. See repo_lib.sh for the
-# shared sign/upload/prune functions minio.sh (the standalone,
-# one-package-at-a-time path) also uses.
+# Signs and indexes every successfully-built package into ONE local repo
+# index per distro, then uploads that index exactly once per distro — not
+# once per package. A real batch (verified against a 26-package archlinux
+# run) otherwise spends most of its wall-clock time re-fetching then
+# re-uploading the same few-KB index objects over and over, once per
+# package that happens to publish successfully, even though every one of
+# those round trips after the first is redundant: nothing outside this
+# run's own packages could have changed the index in between. See
+# scripts/publish/repo_lib.sh for the generic S3 upload primitives
+# (shared with minio.sh, the standalone one-package-at-a-time path) and
+# backends/<distro>/repo_lib.sh for the repo-format-specific sign/index/
+# prune functions.
 #
 # Must run from the job workspace root (the directory holding `artifacts/`
 # — this run's downloaded build-* artifacts —, `build-kit/` — this
@@ -141,6 +145,12 @@ bucket="${R2_BUCKET:?R2_BUCKET required}"
 
 for distro in "${distros[@]:-}"; do
   [[ -z "$distro" ]] && continue
+  # Sourced per-iteration (not once at the top, like the generic lib
+  # above): a batch mixing distros would need each iteration's function
+  # calls (sign_and_add, upload_repo, prune_*) to resolve to THAT
+  # iteration's own repo-format implementation, not whichever distro
+  # happened to source last.
+  source "build-kit/backends/$distro/repo_lib.sh"
   remote="${alias_name}/${bucket}/${distro}/x86_64"
   db_file="${repo_name}.db.tar.gz"
   files_file="${repo_name}.files.tar.gz"

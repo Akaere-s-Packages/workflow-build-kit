@@ -8,7 +8,9 @@ set -euo pipefail
 # with exit code 1" and no visible reason why.
 set -x
 
-# Builds one AUR package with makepkg and emits, into $out_dir:
+# archlinux backend: builds one AUR package with makepkg and emits, into
+# $out_dir, the backends/<distro>/ build.sh contract's outputs (see
+# backends/README.md):
 #   <name>-<version>-x86_64.pkg.tar.zst   the built package
 #   file_list.json                        {"package_size_bytes": N, "files": [...]}
 #   build_meta.json                       {"description","url","licenses","packager","dependencies":[...]}
@@ -17,7 +19,7 @@ set -x
 # a throwaway non-root user internally because makepkg refuses to run as
 # root.
 #
-# Usage: package.sh <name> <pkgbase> <out-dir> [aur_depends...]
+# Usage: build.sh <name> <pkgbase> <out-dir> [aur_depends...]
 #
 # aur_depends are other AUR packages (not in the official repos) that must
 # be built and installed into the container before <pkgbase> itself, for
@@ -193,39 +195,37 @@ cp "$pkg_file" "$out_dir/"
 
 # --- file list + total size, excluding directories and pacman's own
 #     bookkeeping entries (.PKGINFO, .MTREE, .BUILDINFO, .INSTALL) ---
-python3 - "$pkg_file" "$out_dir/file_list.json" <<'PY'
-import json
-import subprocess
-import sys
-
-pkg_path, out_path = sys.argv[1], sys.argv[2]
-listing = subprocess.run(
-    ["bsdtar", "-tvf", pkg_path], capture_output=True, text=True, check=True
-).stdout
-
-files = []
-total = 0
-for line in listing.splitlines():
+# awk extracts "size<TAB>path" for qualifying entries, then jq turns that
+# into the final JSON — piped straight through (never held as a single
+# jq command-line argument), since a package with several thousand files
+# (visual-studio-code-bin, for real) would otherwise risk overflowing how
+# much a subprocess can be handed as one argv entry.
+bsdtar -tvf "$pkg_file" | awk '
+  {
     # mode links owner group size mon day time-or-year path (9 whitespace-
     # separated fields; bsdtar -tvf always lists BOTH owner and group).
-    parts = line.split(None, 8)
-    if len(parts) < 9:
-        continue
-    mode, _links, _owner, _group, size, _mon, _day, _time, path = parts
-    if mode.startswith("d") or path.startswith("."):
-        continue
-    size = int(size)
-    # bsdtar lists paths relative to the archive root (e.g. "opt/1Password/1password",
-    # never a leading "/") — but these are real installed absolute paths once pacman
-    # extracts the package onto a live system, so store them that way everywhere this
-    # feeds into (website file listings, PR-preview diff comments).
-    files.append({"path": f"/{path}", "size_bytes": size})
-    total += size
-
-with open(out_path, "w") as f:
-    json.dump({"package_size_bytes": total, "files": files}, f, indent=2)
-    f.write("\n")
-PY
+    # Capped at 9 fields, not free-split, so a path containing spaces
+    # still comes through whole in $9-onward instead of getting chopped.
+    if (NF < 9) next
+    mode = $1
+    size = $5
+    path = $9
+    for (i = 10; i <= NF; i++) path = path " " $i
+    if (substr(mode, 1, 1) == "d") next
+    if (substr(path, 1, 1) == ".") next
+    print size "\t" path
+  }
+' | jq -R -s '
+  split("\n") | map(select(length > 0)) | map(split("\t"))
+  # bsdtar lists paths relative to the archive root (e.g.
+  # "opt/1Password/1password", never a leading "/") — but these are real
+  # installed absolute paths once pacman extracts the package onto a live
+  # system, so store them that way everywhere this feeds into (website
+  # file listings, PR-preview diff comments).
+  | map({path: ("/" + .[1]), size_bytes: (.[0] | tonumber)})
+  | . as $files
+  | {package_size_bytes: ([$files[].size_bytes] | add // 0), files: $files}
+' > "$out_dir/file_list.json"
 
 # --- metadata from .PKGINFO: the authoritative record of what THIS build
 #     actually contains (pkgdesc/url/license/depends as makepkg resolved
@@ -233,86 +233,92 @@ PY
 #     container's own pacman sync db ---
 bsdtar -xOf "$pkg_file" .PKGINFO > "$out_dir/.PKGINFO.raw"
 
-python3 - "$out_dir/.PKGINFO.raw" "$out_dir/build_meta.json" <<'PY'
-import json
-import os
-import subprocess
-import sys
+# classify_dep <dep-spec> <pkginfo-field-name> <output-type-name>: prints
+# one dependency's classified JSON object. dep-spec is the raw PKGINFO
+# value (e.g. "glibc>=2.31", or for optdepend "foo: needed for bar").
+classify_dep() {
+  local dep_spec="$1" dep_type="$2" type_name="$3"
+  local dep_name="$dep_spec" desc=""
 
-pkginfo_path, out_path = sys.argv[1], sys.argv[2]
+  if [[ "$dep_type" == "optdepend" && "$dep_spec" == *": "* ]]; then
+    dep_name="${dep_spec%%: *}"
+    desc="${dep_spec#*: }"
+  fi
+  local sep
+  for sep in ">=" "<=" "=" ">" "<"; do
+    dep_name="${dep_name%%"$sep"*}"
+  done
 
-fields = {"license": [], "depend": [], "optdepend": [], "makedepend": []}
-description = None
-url = None
-packager = None
+  # Default "aur" (not found in any sync repo -> assumed to be another AUR
+  # package); null only when pacman itself couldn't be asked at all (not
+  # installed, or the lookup timed out) — a clean "not found in any repo"
+  # answer from pacman still means "aur", not "unknown".
+  local repo="aur"
+  if ! command -v pacman >/dev/null 2>&1; then
+    repo=""
+  else
+    local pacman_out pacman_status
+    # Force C locale: pacman localizes field names based on the
+    # container's LANG (e.g. it prints "Repository" only in English
+    # locales), and we need to match that field name reliably.
+    if pacman_out="$(LC_ALL=C timeout 10 pacman -Si "$dep_name" 2>/dev/null)"; then
+      pacman_status=0
+    else
+      pacman_status=$?
+    fi
+    if [[ $pacman_status -eq 124 ]]; then
+      repo=""
+    else
+      local repo_line
+      repo_line="$(grep -m1 '^Repository' <<<"$pacman_out" || true)"
+      [[ -n "$repo_line" ]] && repo="$(sed 's/^[^:]*:[[:space:]]*//' <<<"$repo_line")"
+    fi
+  fi
 
-with open(pkginfo_path, encoding="utf-8") as fh:
-    for line in fh:
-        if " = " not in line:
-            continue
-        key, _, value = line.strip().partition(" = ")
-        if key == "pkgdesc":
-            description = value
-        elif key == "url":
-            url = value
-        elif key == "packager":
-            packager = value
-        elif key in fields:
-            fields[key].append(value)
+  jq -cn --arg name "$dep_name" --arg type "$type_name" --arg repo "$repo" --arg desc "$desc" '
+    {name: $name, type: $type, repo: (if $repo == "" then null else $repo end)}
+    + (if $desc != "" then {description: $desc} else {} end)
+  '
+}
 
-TYPE_NAMES = {"depend": "depends", "optdepend": "optdepends", "makedepend": "makedepends"}
+description="" pkg_url="" packager=""
+licenses=() depends=() optdepends=() makedepends=()
+while IFS= read -r line; do
+  [[ "$line" == *" = "* ]] || continue
+  key="${line%% = *}"
+  value="${line#* = }"
+  case "$key" in
+    pkgdesc) description="$value" ;;
+    url) pkg_url="$value" ;;
+    packager) packager="$value" ;;
+    license) licenses+=("$value") ;;
+    depend) depends+=("$value") ;;
+    optdepend) optdepends+=("$value") ;;
+    makedepend) makedepends+=("$value") ;;
+  esac
+done < "$out_dir/.PKGINFO.raw"
 
+# Classified dependencies go to a temp NDJSON file (one object per line,
+# not accumulated as command-line arguments) before the final jq assembly
+# — same argv-safety reasoning as the file listing above; a package can
+# have dozens of dependencies, cheap to get right regardless.
+deps_ndjson="$(mktemp)"
+for dep in "${depends[@]}"; do classify_dep "$dep" depend depends >> "$deps_ndjson"; done
+for dep in "${optdepends[@]}"; do classify_dep "$dep" optdepend optdepends >> "$deps_ndjson"; done
+for dep in "${makedepends[@]}"; do classify_dep "$dep" makedepend makedepends >> "$deps_ndjson"; done
 
-def classify(dep_spec: str, dep_type: str) -> dict:
-    if dep_type == "optdepend" and ": " in dep_spec:
-        dep_name, _, desc = dep_spec.partition(": ")
-    else:
-        dep_name, desc = dep_spec, None
-    for sep in (">=", "<=", "=", ">", "<"):
-        dep_name = dep_name.split(sep, 1)[0]
+licenses_json="$(printf '%s\n' "${licenses[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
 
-    repo = "aur"
-    try:
-        # Force C locale: pacman localizes field names based on the
-        # container's LANG (e.g. it prints "Repository" only in English
-        # locales), and we need to match that field name reliably.
-        env = {**os.environ, "LC_ALL": "C"}
-        out = subprocess.run(
-            ["pacman", "-Si", dep_name], capture_output=True, text=True, timeout=10, env=env
-        )
-        for l in out.stdout.splitlines():
-            if l.startswith("Repository"):
-                repo = l.split(":", 1)[1].strip()
-                break
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        repo = None
-
-    entry = {"name": dep_name, "type": TYPE_NAMES[dep_type], "repo": repo}
-    if desc:
-        entry["description"] = desc
-    return entry
-
-
-dependencies = []
-for dep_type in ("depend", "optdepend", "makedepend"):
-    for dep in fields[dep_type]:
-        dependencies.append(classify(dep, dep_type))
-
-with open(out_path, "w") as f:
-    json.dump(
-        {
-            "description": description,
-            "url": url,
-            "licenses": fields["license"],
-            "packager": packager,
-            "dependencies": dependencies,
-        },
-        f,
-        indent=2,
-    )
-    f.write("\n")
-PY
-
-rm -f "$out_dir/.PKGINFO.raw"
+jq -n --slurpfile deps "$deps_ndjson" --argjson licenses "$licenses_json" \
+  --arg description "$description" --arg url "$pkg_url" --arg packager "$packager" '
+  {
+    description: (if $description == "" then null else $description end),
+    url: (if $url == "" then null else $url end),
+    licenses: $licenses,
+    packager: (if $packager == "" then null else $packager end),
+    dependencies: $deps
+  }
+' > "$out_dir/build_meta.json"
+rm -f "$deps_ndjson" "$out_dir/.PKGINFO.raw"
 
 echo "built $(basename "$pkg_file")"

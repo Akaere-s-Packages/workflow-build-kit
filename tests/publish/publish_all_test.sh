@@ -115,8 +115,9 @@ MC
     GPG_KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')"
     export GPG_KEY_ID GPG_PASSPHRASE=""
 
-    mkdir -p build-kit/scripts/publish
+    mkdir -p build-kit/scripts/publish build-kit/backends/archlinux
     cp "$repo_root/scripts/publish/repo_lib.sh" build-kit/scripts/publish/
+    cp "$repo_root/backends/archlinux/repo_lib.sh" build-kit/backends/archlinux/
     sed -n '/^repo_name=/,$p' "$repo_root/scripts/publish/publish_all.sh" > batch_only.sh
     bash batch_only.sh > run.log 2>&1
   )

@@ -6,7 +6,7 @@ set -euo pipefail
 # a diff comment body over GitHub's hard 65536-character limit on an
 # issue/PR comment, and `comment` job in pr-preview.yml failed outright
 # with a 422 ("Body is too long") instead of posting anything at all.
-# diff.py now caps the file table to a fixed character budget
+# diff.sh now caps the file table to a fixed character budget
 # (MAX_ROWS_CHARS) and notes how many rows got left out, rather than
 # emitting an unbounded table.
 
@@ -20,13 +20,12 @@ trap 'rm -rf "$tmp"' EXIT
 bogus_base_url="http://invalid.invalid"
 
 # --- large file list: must stay under GitHub's real 65536-char cap ---
-python3 - "$tmp/big_file_list.json" <<'PY'
-import json, sys
-files = [{"path": f"/usr/share/fake/locale-file-{i:05d}.pak", "size_bytes": 1000 + i} for i in range(3000)]
-json.dump({"files": files, "package_size_bytes": sum(f["size_bytes"] for f in files)}, open(sys.argv[1], "w"))
-PY
+jq -n '[range(3000)] | map({
+    path: ("/usr/share/fake/locale-file-" + ((tostring | ("0000" + .))[-5:]) + ".pak"),
+    size_bytes: (1000 + .)
+  }) | {files: ., package_size_bytes: (map(.size_bytes) | add)}' > "$tmp/big_file_list.json"
 
-body="$(python3 "$repo_root/scripts/preview/diff.py" \
+body="$("$repo_root/scripts/preview/diff.sh" \
   --name visual-studio-code-bin --old-version 1.0-1 --new-version 1.1-1 \
   --build-status success --job-url https://example.com/job \
   --file-list "$tmp/big_file_list.json" \
@@ -44,12 +43,9 @@ grep -q '(truncated)' <<< "$body" || {
 }
 
 # --- small file list: must NOT be truncated (no false positive) ---
-python3 - "$tmp/small_file_list.json" <<'PY'
-import json, sys
-json.dump({"files": [{"path": "/usr/bin/foo", "size_bytes": 100}], "package_size_bytes": 100}, open(sys.argv[1], "w"))
-PY
+jq -n '{files: [{path: "/usr/bin/foo", size_bytes: 100}], package_size_bytes: 100}' > "$tmp/small_file_list.json"
 
-small_body="$(python3 "$repo_root/scripts/preview/diff.py" \
+small_body="$("$repo_root/scripts/preview/diff.sh" \
   --name foo --new-version 1.0-1 --build-status success --job-url https://example.com/job \
   --file-list "$tmp/small_file_list.json" \
   --published-base-url "$bogus_base_url" 2>/dev/null)"
@@ -63,4 +59,4 @@ grep -q '/usr/bin/foo' <<< "$small_body" || {
   exit 1
 }
 
-echo "PASS: diff.py caps comment body under GitHub's 65536-char limit"
+echo "PASS: diff.sh caps comment body under GitHub's 65536-char limit"
