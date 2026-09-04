@@ -1,0 +1,42 @@
+name: merge-queue
+
+# Called by Registry after every pr-preview/build-and-publish run
+# completes (either could make a bump/* PR newly ready, or free up the
+# queue by finishing) plus on workflow_dispatch for manual recovery.
+# Merges at most one ready bump/* autoPR (see scripts/aur/check_updates.py)
+# per invocation, and only once this repo's Actions are completely idle —
+# see scripts/aur/merge_queue.py for the full rule set and rationale.
+
+on:
+  workflow_call:
+    secrets:
+      LILITHYA_PUSH_TOKEN:
+        required: true
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+
+jobs:
+  drain-queue:
+    runs-on: ubuntu-latest
+    # Only one drain attempt at a time: if two triggers land close
+    # together (pr-preview and build-and-publish completing within
+    # seconds of each other is the common case), the second one queues
+    # behind the first instead of both deciding the repo looks idle at
+    # the same time and racing each other to merge.
+    concurrency:
+      group: akaere-merge-queue
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+      - name: drain one PR from the merge queue
+        env:
+          GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+        run: python3 .build-kit/scripts/aur/merge_queue.py

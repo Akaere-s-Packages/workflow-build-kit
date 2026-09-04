@@ -70,7 +70,24 @@ Packages that hard-depend on each other (via AUR's `Depends`/`MakeDepends`) and 
 
 If a group's branch already has an open PR, this doesn't open a second one: it force-pushes the branch in place with the current target versions and updates the PR's title/body, or leaves it untouched if it's already at the exact versions being targeted.
 
-Every PR this opens/updates gets GitHub's native auto-merge enabled (rebase strategy) using the same `LILITHYA_PUSH_TOKEN`, so it merges itself once its required status checks (pr-preview's build) pass — no extra secret, and `pr-preview.yml` stays exactly as secret-free as before. This needs two one-time repo settings that no workflow can set: **Allow auto-merge** and **Allow rebase merging** under Settings → General, plus pr-preview's build check added as a required status check on `main`'s branch protection.
+This script never merges anything itself — see `merge-queue.yml` below for that.
+
+### `merge-queue.yml` — after pr-preview/build-and-publish: merge one ready autoPR
+
+```yaml
+# Registry/.github/workflows/merge-queue.yml
+on:
+  workflow_run:
+    workflows: ["pr-preview", "build-and-publish"]
+    types: [completed]
+  workflow_dispatch: {}
+jobs:
+  drain-queue:
+    uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/merge-queue.yml@main
+    secrets: inherit
+```
+
+Merges at most one ready `bump/*` autoPR (see `check_updates.py` above) per invocation, using the same `LILITHYA_PUSH_TOKEN` — no extra secret. "Ready" means both: (1) its own pr-preview build has passed and it's cleanly mergeable, and (2) this repo's Actions are completely idle (nothing else queued or in progress) — so merges never overlap, and a merge's `build-and-publish` run always finishes before the next `bump/*` PR merges. Deletes the head branch as part of the merge. Re-triggers itself on every pr-preview/build-and-publish completion, so the queue drains one PR at a time without a human or a blind poll involved. Needs one one-time repo setting no workflow can set: **Allow rebase merging** under Settings → General (branch protection requiring pr-preview's build check is recommended as defense in depth, but `merge_queue.py` already verifies checks itself before merging).
 ## `scripts/`
 
 Organized by pipeline stage. Every script can run standalone outside a workflow (only depends on standard command-line tools: `bsdtar`/`pacman`/`mc`/`gpg`/`git`/`gh`/`jq`, no extra package dependencies):
@@ -83,7 +100,8 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `registry/aur_graph.py` | Shared dependency-graph helpers (batched AUR RPC fetch, hard-Depends/MakeDepends graph, connected components, topological/layered ordering) — imported by both `aur/check_updates.py` and `registry/resolve_build_order.py`, not run standalone |
 | `registry/resolve_build_order.py` | Expand a changed-package set to everything hard-dependent on it, laid out in up to N dependency-ordered build layers |
 | `aur/check_version.sh` | Look up one pkgbase's latest version on AUR |
-| `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open/force-update PRs, enable auto-merge on them |
+| `aur/check_updates.py` | Find out-of-date autoupdate packages, group dependency-related ones, open/force-update `bump/*` PRs (never merges them — see `merge_queue.py`) |
+| `aur/merge_queue.py` | Merge at most one ready `bump/*` autoPR per run — its own checks green and this repo's Actions idle — so autoPR merges never overlap. Run by `merge-queue.yml` |
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
 | `publish/repo_lib.sh` | Shared functions (sourced, not run standalone): download/upload the repo db, sign+`repo-add` one package into it, prune old versions. Used by both `minio.sh` and `publish_all.sh` below |
 | `publish/minio.sh` | Publishes exactly one package end-to-end: downloads the db, signs + `repo-add`s this one package, uploads the db back, prunes. `KEEP_VERSIONS` default 1 |
