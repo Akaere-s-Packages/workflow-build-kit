@@ -38,6 +38,17 @@ def fetch_published(base_url: str, name: str) -> dict | None:
         return None
 
 
+# GitHub rejects an issue/PR comment body over 65536 characters outright
+# (real failure: visual-studio-code-bin's diff — ~9000 files, nearly all
+# of them re-sized by the version bump — produced a ~270000-char table and
+# the whole `comment` job step failed with a 422). The rest of this
+# comment (header/version/status/size-summary/anchor) is at most a few
+# hundred characters, so budgeting well under the real limit for the table
+# rows leaves a large, safe margin regardless of how many packages this PR
+# touches or how long their paths are.
+MAX_ROWS_CHARS = 55000
+
+
 def fmt_delta(n: int) -> str:
     sign = "+" if n >= 0 else "-"
     n = abs(n)
@@ -94,7 +105,17 @@ def main() -> int:
     if rows:
         lines.append("| Status | File | Size change |")
         lines.append("|---|---|---|")
-        lines.extend(rows)
+        shown, budget, omitted = [], MAX_ROWS_CHARS, 0
+        for row in rows:
+            if budget - (len(row) + 1) < 0:
+                omitted += 1
+                continue
+            shown.append(row)
+            budget -= len(row) + 1
+        lines.extend(shown)
+        if omitted:
+            noun = "file" if omitted == 1 else "files"
+            lines.append(f"| _(truncated)_ | _{omitted} more {noun} not shown — comment size limit_ | |")
         lines.append("")
     elif published is None:
         lines.append("_(no published version to compare against yet — these are all of this package's files)_")

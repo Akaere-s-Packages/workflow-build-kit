@@ -109,7 +109,7 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `publish/minio.sh` | Publishes exactly one package end-to-end: downloads the db, signs + `repo-add`s this one package, uploads the db back, prunes. `KEEP_VERSIONS` default 1 |
 | `publish/publish_all.sh` | Orchestrates the whole `publish` job for a batch of packages: install `mc`, import the GPG key once, then for every built package sign + `repo-add` it into ONE local db per distro and upload that db exactly once (not once per package — the previous per-package-calls-minio.sh design re-fetched and re-uploaded the same db.tar.gz/.sig/.files on every single successful package, which dominated a multi-package publish job's wall-clock time for no reason), stage a copy of each published file under `attest-artifacts/` for the workflow's own `actions/attest-build-provenance` step (see below), assemble `built_packages.json` (now including each published file's `filename`/`sha256`). Must run inside `archlinux:base-devel` (`repo-add`/`vercmp` ship with `pacman` itself — nothing to install on a bare Ubuntu runner) |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |
-| `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment |
+| `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment (file table capped to stay under GitHub's 65536-char comment body limit) |
 
 ### Build ordering
 
