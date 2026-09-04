@@ -54,7 +54,7 @@ jobs:
         run: |
           git config user.name "Lilithya"
           git config user.email "me@lilithya.su"
-          .build-kit/scripts/update/add_package.sh \
+          bash .build-kit/scripts/update/add_package.sh \
             --registry-root . \
             --package "${{ inputs.package-name }}" \
             --distro "${{ inputs.distro }}" \

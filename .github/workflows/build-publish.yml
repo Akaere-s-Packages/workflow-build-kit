@@ -126,7 +126,7 @@ jobs:
               exit 1
             fi
             printf '%s\n' "$requested" | jq -R . | jq -s . > names.json
-            .build-kit/scripts/registry/detect_changed_packages.sh --names names.json > changed.json
+            bash .build-kit/scripts/registry/detect_changed_packages.sh --names names.json > changed.json
             resolved="$(jq -r '.[].name' changed.json | sort -u)"
             missing="$(comm -23 <(printf '%s\n' "$requested") <(printf '%s\n' "$resolved") || true)"
             if [[ -n "$missing" ]]; then
@@ -143,15 +143,15 @@ jobs:
             echo '[]' > changed.json
             removed_count=0
           elif [[ "${{ inputs.rebuild-all }}" == "true" ]]; then
-            .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
+            bash .build-kit/scripts/registry/detect_changed_packages.sh --all > changed.json
             removed_count=0
           elif [[ "${{ inputs.retry-failed }}" == "true" ]]; then
             gh issue list --repo "$GITHUB_REPOSITORY" --state open --label build-failure --limit 1000 --json title |
               jq '[.[].title | select(startswith("[build-failure] ")) | ltrimstr("[build-failure] ")]' > failed-names.json
-            .build-kit/scripts/registry/detect_changed_packages.sh --names failed-names.json > changed.json
+            bash .build-kit/scripts/registry/detect_changed_packages.sh --names failed-names.json > changed.json
             removed_count=0
           else
-            .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+            bash .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
             # Packages deleted between base-sha and head-sha don't need
             # building (detect_changed_packages.sh already excludes them
             # via --diff-filter=d) but DO need the publish job to run at
@@ -176,7 +176,7 @@ jobs:
           # dependency-ordered build layers ("waves"). Padded to exactly 5
           # entries by resolve_build_order.sh, so layer0..layer4 are always
           # valid — no need to guard against a shorter array.
-          .build-kit/scripts/registry/resolve_build_order.sh \
+          bash .build-kit/scripts/registry/resolve_build_order.sh \
             --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved build layers:"; cat layers.json
           # Bare assignments (not `echo "x=$(...)"`) so a genuine jq

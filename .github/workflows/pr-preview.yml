@@ -46,12 +46,12 @@ jobs:
           path: .build-kit
       - id: detect
         run: |
-          .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
+          bash .build-kit/scripts/registry/detect_changed_packages.sh "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" > changed.json
           echo "changed packages:"; cat changed.json
       - name: validate schema
         run: |
           paths=$(jq -r '[.[].path] | join(" ")' changed.json)
-          [[ -n "$paths" ]] && .build-kit/scripts/registry/validate_schema.sh $paths || echo "nothing to validate"
+          [[ -n "$paths" ]] && bash .build-kit/scripts/registry/validate_schema.sh $paths || echo "nothing to validate"
       - name: build depgraph
         run: make -C .build-kit/tools/depgraph
       - id: resolve
@@ -61,7 +61,7 @@ jobs:
           # it depends on it) — order doesn't matter for the preview build
           # (nothing here needs makepkg-time ordering), so flatten straight
           # into one list for a single parallel matrix.
-          .build-kit/scripts/registry/resolve_build_order.sh \
+          bash .build-kit/scripts/registry/resolve_build_order.sh \
             --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved packages:"; cat layers.json
           # Bare assignment so a genuine jq failure trips `set -e` instead
