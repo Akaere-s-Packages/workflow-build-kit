@@ -5,9 +5,8 @@ build artifacts.
 
 Every run refreshes AUR-sourced fields (description, url, licenses,
 maintainer, submitter, votes, popularity, first_submitted) for every
-tracked package from one batched AUR RPC call — that data is cheap and
-small, and keeping it fresh for the *whole* registry (not just whatever
-happened to be rebuilt) is what makes stats.json/required_by honest.
+tracked package from one batched AUR RPC call, then refreshes each package's
+source list from its pkgbase's .SRCINFO.
 
 Build-derived fields (files, package_size_bytes, dependencies with repo
 classification, packager, build_status, build_run_url, last_updated,
@@ -41,6 +40,10 @@ import datetime
 import json
 import pathlib
 import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "registry"))
@@ -80,7 +83,80 @@ def first_added_date(registry_root: pathlib.Path, toml_path: pathlib.Path) -> st
     return datetime.datetime.fromisoformat(earliest).astimezone(datetime.timezone.utc).strftime(DATE_FMT)
 
 
-def build_detail(entry: dict, aur: dict, built: dict | None, existing: dict | None) -> dict:
+
+def parse_sources(srcinfo: str) -> list[dict[str, str]]:
+    """Return displayable source metadata from a pkgbase's .SRCINFO."""
+    sources: list[dict[str, str]] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    for line in srcinfo.splitlines():
+        key, separator, value = line.partition(" = ")
+        key = key.strip()
+        if not separator or (key != "source" and not key.startswith("source_")):
+            continue
+
+        name, alias, location = "", "", value.strip()
+        if "::" in location:
+            alias, _, location = location.partition("::")
+            alias = alias.strip()
+            location = location.strip()
+
+        for vcs_prefix in ("git+", "hg+", "svn+", "bzr+"):
+            if location.startswith(vcs_prefix):
+                location = location.removeprefix(vcs_prefix)
+                break
+
+        url = location if location.startswith(("https://", "http://", "ftp://")) else None
+        if alias:
+            name = alias
+        elif url:
+            name = url.split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        else:
+            name = location
+
+        entry = (name, url)
+        if name and entry not in seen:
+            sources.append({"name": name, **({"url": url} if url else {})})
+            seen.add(entry)
+
+    return sources
+
+
+def fetch_srcinfo_sources(pkgbase: str) -> list[dict[str, str]] | None:
+    """Fetch a pkgbase's source declarations, preserving stale data on failure."""
+    url = "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=" + urllib.parse.quote(pkgbase)
+    last_exc: Exception | None = None
+
+    for attempt in range(1, aur_graph.RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                return parse_sources(response.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            last_exc = exc
+            if attempt < aur_graph.RETRY_ATTEMPTS:
+                print(
+                    f"::warning::.SRCINFO lookup for {pkgbase} failed "
+                    f"(attempt {attempt}/{aur_graph.RETRY_ATTEMPTS}), retrying in "
+                    f"{aur_graph.RETRY_DELAY_SECONDS}s: {exc}",
+                    file=sys.stderr,
+                )
+                time.sleep(aur_graph.RETRY_DELAY_SECONDS)
+
+    print(
+        f"::warning::.SRCINFO lookup for {pkgbase} failed after "
+        f"{aur_graph.RETRY_ATTEMPTS} attempts; retaining prior sources: {last_exc}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def build_detail(
+    entry: dict,
+    aur: dict,
+    built: dict | None,
+    existing: dict | None,
+    sources: list[dict[str, str]] | None,
+) -> dict:
     name = entry["name"]
 
     build_meta: dict = {}
@@ -112,8 +188,10 @@ def build_detail(entry: dict, aur: dict, built: dict | None, existing: dict | No
     detail["url"] = build_meta.get("url") or aur.get("URL") or detail.get("url")
     detail["licenses"] = build_meta.get("licenses") or aur.get("License") or detail.get("licenses") or []
 
+    if sources is not None:
+        detail["sources"] = sources
+
     if built is None:
-        # Untouched this run: everything build-derived stays as it was.
         detail.setdefault("version", entry["version"])
         detail.setdefault("build_status", "unknown")
         detail.setdefault("build_run_url", None)
@@ -186,6 +264,11 @@ def main() -> int:
     # sharing a pkgbase silently inherit one of them's dependency list.
     aur_by_name = aur_graph.fetch_aur_info([e["name"] for e in registry_entries])
 
+    # Sources are common to split packages, so fetch each pkgbase once.
+    sources_by_pkgbase = {
+        pkgbase: fetch_srcinfo_sources(pkgbase)
+        for pkgbase in sorted({entry["pkgbase"] for entry in registry_entries})
+    }
     # required_by: reverse-map of AUR's own Depends/OptDepends/MakeDepends
     # across every tracked package, restricted to names we ourselves track.
     tracked_names = {e["name"] for e in registry_entries}
@@ -218,10 +301,9 @@ def main() -> int:
         name = entry["name"]
         existing_path = details_dir / f"{name}.json"
         existing = json.loads(existing_path.read_text()) if existing_path.exists() else None
-        aur = aur_by_name.get(entry["name"], {})
+        aur = aur_by_name.get(name, {})
 
-        detail = build_detail(entry, aur, built_by_name.get(name), existing)
-        detail["required_by"] = [{"name": n} for n in sorted(required_by.get(name, []))]
+        detail = build_detail(entry, aur, built_by_name.get(name), existing, sources_by_pkgbase[entry["pkgbase"]])
         existing_path.write_text(json.dumps(detail, indent=2) + "\n")
 
         if detail.get("maintainer"):
