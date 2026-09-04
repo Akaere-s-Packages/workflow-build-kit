@@ -1,0 +1,61 @@
+name: add-package
+
+# Quick-add pipeline: given one upstream package name (typed in by hand
+# via workflow_dispatch), resolves its full dependency closure that isn't
+# already available through the distro's own package manager and opens
+# one PR introducing it plus every such dependency — see
+# scripts/update/add_package.sh for the resolution/ordering logic.
+#
+# Distro-agnostic itself: dispatches to backends/<distro>/fetch-info.sh
+# and classify-dep.sh (see backends/README.md), defaulting to archlinux
+# since that's the only backend that exists today.
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: Upstream package name to introduce (e.g. an AUR pkgname).
+        required: true
+        type: string
+      distro:
+        required: false
+        type: string
+        default: archlinux
+      source-type:
+        required: false
+        type: string
+        default: aur
+    secrets:
+      LILITHYA_PUSH_TOKEN:
+        required: true
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+
+jobs:
+  add-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+
+      - name: build depgraph
+        run: make -C .build-kit/tools/depgraph
+
+      - name: resolve dependency closure and open a PR
+        env:
+          GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+        run: |
+          git config user.name "Lilithya"
+          git config user.email "me@lilithya.su"
+          .build-kit/scripts/update/add_package.sh \
+            --registry-root . \
+            --package "${{ inputs.package-name }}" \
+            --distro "${{ inputs.distro }}" \
+            --type "${{ inputs.source-type }}"

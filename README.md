@@ -93,6 +93,31 @@ jobs:
 
 Merges at most one ready `bump/*` autoPR (see `check_updates.sh` above) per invocation, using the same `LILITHYA_PUSH_TOKEN` — no extra secret. "Ready" means both: (1) its own pr-preview build has passed and it's cleanly mergeable, and (2) this repo's Actions are completely idle (nothing else queued or in progress) — so merges never overlap, and a merge's `build-and-publish` run always finishes before the next `bump/*` PR merges. Deletes the head branch as part of the merge. Re-triggers itself on every pr-preview/build-and-publish completion, so the queue drains one PR at a time without a human or a blind poll involved. Needs one one-time repo setting no workflow can set: **Allow rebase merging** under Settings → General (branch protection requiring pr-preview's build check is recommended as defense in depth, but `merge_queue.sh` already verifies checks itself before merging).
 
+### `add-package.yml` — manual: quick-add one upstream package (+ its dependency closure)
+
+```yaml
+# Registry/.github/workflows/add-package.yml
+on:
+  workflow_dispatch:
+    inputs:
+      package-name:
+        description: Upstream package name to introduce (e.g. an AUR pkgname)
+        required: true
+        type: string
+jobs:
+  add-package:
+    uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/add-package.yml@main
+    with:
+      package-name: ${{ inputs.package-name }}
+    secrets: inherit
+```
+
+Type in one package name, get back a PR. Resolves the full hard-dependency closure that isn't already installable through the distro's own package manager (via `backends/<distro>/fetch-info.sh` + the new `classify-dep.sh`, see `backends/README.md`) and generates a Registry TOML entry for every package in that closure that isn't already tracked — not just the one requested, so a dependency chain (however deep) comes in as one bundled PR instead of needing N manual runs. Ordering and commit style match `check_updates.sh`: dependencies committed before dependents, `$pkgname: add $pkgver` per commit, one PR on branch `add/<name1>+<name2>+...`.
+
+Deliberately conservative compared to `check_updates.sh`'s daily job: if the target branch already has an open PR, this leaves it alone rather than force-pushing over it (an autoPR is expected to be rewritten daily; a manually-triggered add-PR might be mid-review). If the requested package (and everything under it) is already tracked, it's a no-op. If a dependency turns out to be resolvable through *neither* the package manager nor upstream (see `scripts/update/add_package.sh`'s real example below), the run fails loudly rather than silently generating a broken entry.
+
+Caught a genuine upstream bug the day this was built: asked to add a package whose PKGBUILD `depends` on a since-renamed official package name, the only way to "resolve" it looked like chain-building an orphaned AUR package by the old name — which itself depended on something that exists in neither the official repos nor AUR at all. The run correctly refused to proceed instead of producing a Registry entry that would fail at build time anyway; the actual fix was a one-line PKGBUILD update upstream, not anything in the Registry.
+
 ## `scripts/`
 
 Distro-agnostic orchestration, organized by pipeline stage — nothing here ever invokes a distro-specific tool directly (see `backends/` below). Every script can run standalone outside a workflow (only depends on standard command-line tools: `bash`/`jq`/`curl`/`git`/`gh`/`gpg`, no extra package dependencies beyond those):
@@ -108,6 +133,7 @@ Distro-agnostic orchestration, organized by pipeline stage — nothing here ever
 | `registry/resolve_build_order.sh` | Expand a changed-package set to everything hard-dependent on it, laid out in up to N dependency-ordered build layers (via `tools/depgraph`) |
 | `update/check_updates.sh` | Find out-of-date autoupdate packages (via each package's own `backends/<distro>/fetch-info.sh`), group dependency-related ones (via `tools/depgraph`), open/force-update `bump/*` PRs (never merges them — see `merge_queue.sh`) |
 | `update/merge_queue.sh` | Merge at most one ready `bump/*` autoPR per run — its own checks green and this repo's Actions idle — so autoPR merges never overlap. Run by `merge-queue.yml`. Not distro-specific at all (pure GitHub PR-queue mechanics) |
+| `update/add_package.sh` | Quick-add: given one upstream package name, resolves its full dependency closure that isn't already installable through the package manager (via `fetch-info.sh` + `classify-dep.sh`), generates a Registry TOML entry for every new package in the closure, and opens one bundled PR. Run by `add-package.yml` (manual, one name typed in via `workflow_dispatch`) |
 | `build/stage_artifact.sh` | Stage/restore build artifact filenames so they're safe for `actions/upload-artifact` (Windows-forbidden characters percent-encoded) |
 | `publish/repo_lib.sh` | Generic S3 (`mc`) upload primitives (sourced, not run standalone) — download/upload metadata objects, upload one package's file. The repo-INDEX-format-specific half (sign+index one package, prune) is `backends/<distro>/repo_lib.sh`, sourced separately — see `backends/README.md` |
 | `publish/minio.sh` | Publishes exactly one package end-to-end: downloads the index, signs + indexes this one package, uploads the index back, prunes. `KEEP_VERSIONS` default 1 |
