@@ -79,8 +79,8 @@ def find_ready_pr() -> int | None:
     """The oldest open bump/* PR whose own checks have all passed and has
     no merge conflict, or None if none qualify yet. Only bump/* branches
     are ever considered — that prefix is exclusively used by
-    check_updates.py's autoPRs (see Docs/06) — so a human's own PR is
-    never touched by this queue. A PR that isn't ready yet is skipped
+    check_updates.py's autoPRs — so a human's own PR is never touched by
+    this queue. A PR that isn't ready yet is skipped
     (not an error): trying the next-oldest candidate instead of blocking
     the whole queue behind one slow build keeps a big bundled PR from
     starving smaller, already-ready ones."""

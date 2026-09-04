@@ -24,10 +24,17 @@ Usage:
 
 built_packages.json (written by the calling workflow, one entry per
 package the `build` job touched this run):
-  [{"type","name","pkgbase","build_status","job_url","artifact_dir"}, ...]
+  [{"type","name","pkgbase","build_status","job_url","artifact_dir",
+    "filename","sha256"}, ...]
 build_status is one of: published | build_failed | publish_failed
 artifact_dir must contain file_list.json and build_meta.json when
-build_status == "published" (see build/package.sh).
+build_status == "published" (see build/package.sh). filename/sha256 are
+the exact published package file's name and digest — set only when this
+package was actually signed and uploaded this run (see publish_all.sh),
+null otherwise. Passed straight through to packageDetails/<name>.json so
+the website can point users at `gh attestation verify <filename> --repo
+...` for the GitHub Artifact Attestation build-publish.yml's publish job
+generates for that same file.
 """
 import argparse
 import datetime
@@ -116,6 +123,8 @@ def build_detail(entry: dict, aur: dict, built: dict | None, existing: dict | No
         detail.setdefault("files", [])
         detail.setdefault("last_updated", None)
         detail.setdefault("packager", None)
+        detail.setdefault("filename", None)
+        detail.setdefault("sha256", None)
         return detail
 
     detail["build_status"] = built["build_status"]
@@ -130,11 +139,18 @@ def build_detail(entry: dict, aur: dict, built: dict | None, existing: dict | No
         detail["dependencies"] = build_meta.get("dependencies", [])
         detail["package_size_bytes"] = file_list.get("package_size_bytes")
         detail["files"] = file_list.get("files", [])
+        detail["filename"] = built.get("filename")
+        detail["sha256"] = built.get("sha256")
         detail.setdefault("sources", [])
     else:
         # Build or publish failed: report the failure, but do NOT pretend
         # the new version shipped — keep whatever was last actually
         # published (may be nothing, if this package has never succeeded).
+        # filename/sha256 deliberately NOT kept from a prior successful
+        # publish here: publish_failed in particular can mean the file did
+        # upload to R2 but the db never picked it up (see publish_all.sh),
+        # so the last *attested* file may not be the one currently live —
+        # safer to show nothing than a filename that might not verify.
         detail.setdefault("version", entry["version"])
         detail.setdefault("last_updated", None)
         detail.setdefault("packager", None)
@@ -142,6 +158,8 @@ def build_detail(entry: dict, aur: dict, built: dict | None, existing: dict | No
         detail.setdefault("sources", [])
         detail.setdefault("files", [])
         detail.setdefault("package_size_bytes", None)
+        detail["filename"] = None
+        detail["sha256"] = None
 
     return detail
 

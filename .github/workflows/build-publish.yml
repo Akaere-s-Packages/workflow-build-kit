@@ -71,6 +71,12 @@ permissions:
   contents: write
   issues: write
   actions: read
+  # For the "attest package provenance" step in the publish job below:
+  # id-token to request the short-lived OIDC token Sigstore signs with,
+  # attestations to write the resulting attestation to this repo. Public
+  # repos only unless the org is on GitHub Enterprise Cloud.
+  id-token: write
+  attestations: write
 
 env:
   WORKFLOW_BUILD_KIT_REF: main
@@ -616,6 +622,17 @@ jobs:
           docker run --rm -v "$PWD:/workspace" -w /workspace \
             -e R2_ENDPOINT -e R2_ACCESS_KEY_ID -e R2_SECRET_ACCESS_KEY -e R2_BUCKET -e GPG_PASSPHRASE -e GPG_PRIVATE_KEY \
             archlinux:base-devel bash build-kit/scripts/publish/publish_all.sh
+
+      - name: attest package provenance
+        # publish_all.sh stages a copy of every package it actually signed
+        # and uploaded this run under attest-artifacts/ — empty (no staged
+        # copies) whenever nothing published this run, e.g. a clean-only or
+        # removal-only run. hashFiles returns '' for a glob that matches
+        # nothing, which this action would otherwise error out on.
+        if: hashFiles('attest-artifacts/*') != ''
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: attest-artifacts/*
 
       - uses: actions/upload-artifact@v4
         with:

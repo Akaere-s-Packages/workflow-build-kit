@@ -38,7 +38,20 @@ set -x
 #               REPO_NAME (default "akaere"), KEEP_VERSIONS (default 1)
 #
 # Writes built_packages.json to the cwd: the final per-package publish
-# manifest (distro/type/name/pkgbase/build_status/job_url/artifact_dir).
+# manifest (distro/type/name/pkgbase/build_status/job_url/artifact_dir/
+# filename/sha256 — the last two only set for packages that actually got
+# signed and uploaded this run, null otherwise).
+#
+# Also stages a copy of every such package's file under ./attest-artifacts/
+# (relative to the job workspace, i.e. actually on the host runner, not
+# just inside this script's container — see below) so the calling
+# workflow's own step, immediately after this script exits, can hand them
+# to `actions/attest-build-provenance` and get GitHub to sign a build
+# provenance attestation for the exact bytes just published. That has to
+# happen as a real workflow step, not from in here: it needs the runner's
+# own OIDC token to talk to Sigstore/GitHub's attestation API, which this
+# script (running inside a throwaway `docker run --rm` archlinux container,
+# with no such credential) has no access to and shouldn't need to.
 
 retry() {
   local attempts=3 delay=5 n=1
@@ -80,8 +93,16 @@ root_dir="$(pwd)"
 # distro present in this batch (currently only ever "archlinux", but the
 # schema allows more) gets its own wholly separate db and its own single
 # download/upload cycle.
-declare -A entry_distro entry_type entry_pkgbase entry_job_url entry_dir entry_status
+declare -A entry_distro entry_type entry_pkgbase entry_job_url entry_dir entry_status entry_filename entry_sha256
 names=()
+
+# Bind-mounted into the container at /workspace (see build-publish.yml),
+# so anything written here is still there on the host runner once this
+# script's `docker run --rm` exits — unlike a package's actual build/sign
+# work_dir below, which is a plain `mktemp -d` INSIDE the container and
+# disappears with it.
+attest_dir="$(pwd)/attest-artifacts"
+mkdir -p "$attest_dir"
 
 for dir in artifacts/build-*/; do
   manifest="${dir}manifest.json"
@@ -170,6 +191,9 @@ for distro in "${distros[@]:-}"; do
     pkg_basename="$(basename "$pkg_file")"
     sig_basename="${pkg_basename}.sig"
     if sign_and_add "$pkg_basename" && upload_package_file "$pkg_basename" "$sig_basename"; then
+      entry_filename[$name]="$pkg_basename"
+      entry_sha256[$name]="$(sha256sum "$pkg_basename" | awk '{print $1}')"
+      cp "$pkg_basename" "$attest_dir/"
       : # left "staged" — resolved to published/publish_failed below, once
         # the one db upload for this distro has actually been attempted
     else
@@ -213,7 +237,9 @@ for name in "${names[@]:-}"; do
     --arg distro "${entry_distro[$name]}" --arg type "${entry_type[$name]}" --arg name "$name" \
     --arg pkgbase "${entry_pkgbase[$name]}" --arg status "${entry_status[$name]}" \
     --arg job_url "${entry_job_url[$name]}" --arg artifact_dir "artifacts/build-${name}/" \
-    '{distro:$distro,type:$type,name:$name,pkgbase:$pkgbase,build_status:$status,job_url:$job_url,artifact_dir:$artifact_dir}')
+    --arg filename "${entry_filename[$name]:-}" --arg sha256 "${entry_sha256[$name]:-}" \
+    '{distro:$distro,type:$type,name:$name,pkgbase:$pkgbase,build_status:$status,job_url:$job_url,artifact_dir:$artifact_dir,
+      filename:(if $filename == "" then null else $filename end),sha256:(if $sha256 == "" then null else $sha256 end)}')
   final=$(jq --argjson e "$entry" '. + [$e]' <<< "$final")
 done
 echo "$final" > "$root_dir/built_packages.json"

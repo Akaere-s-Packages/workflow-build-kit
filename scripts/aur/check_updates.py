@@ -20,9 +20,9 @@ job, not this script's: merge_queue.py (run by merge-queue.yml, triggered
 after every pr-preview/build-and-publish run) independently discovers all
 open `bump/*` PRs, waits for each one's pr-preview build to actually pass,
 and merges them one at a time, never while this repo has any other Actions
-run in progress — see Docs/06-pr-preview-and-notifications.md in the
-planning repo for the full design and the one remaining manual repo
-setting it needs.
+run in progress. The only remaining manual prerequisite is "Allow rebase
+merging" under Settings → General → Pull Requests — merge_queue.py's own
+`gh pr merge --rebase` needs that merge strategy allowed.
 
 Must run inside a checkout of the Registry repo, on branch "main", with
 git user.name/user.email already configured and GH_TOKEN in the

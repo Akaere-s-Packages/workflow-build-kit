@@ -1,6 +1,6 @@
 # workflow-build-kit
 
-Reusable GitHub Actions workflows for [`Registry`](https://github.com/Akaere-s-Packages/Registry): build AUR packages, GPG-sign them, publish to a R2-backed pacman repo, sync [`WebSite-Kit`](https://github.com/Akaere-s-Packages/WebSite-Kit)'s display data, maintain Registry's own README, and check daily for upstream version updates.
+Reusable GitHub Actions workflows for [`Registry`](https://github.com/Akaere-s-Packages/Registry): build AUR packages, GPG-sign them, publish to a R2-backed pacman repo, generate a GitHub Artifact Attestation for each published file, sync [`WebSite-Kit`](https://github.com/Akaere-s-Packages/WebSite-Kit)'s display data, maintain Registry's own README, and check daily for upstream version updates.
 
 ## Reusable workflows
 
@@ -28,6 +28,8 @@ Secrets required (set on the Registry repo):
 | `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | publishing to R2 |
 | `GPG_PRIVATE_KEY` (base64-encoded armor export) / `GPG_PASSPHRASE` | signing packages |
 | `WEBSITE_KIT_PUSH_TOKEN` | a token with push access to the WebSite-Kit repo |
+
+The calling workflow also needs `id-token: write` and `attestations: write` permissions (no secret — a caller-granted permission, same as `contents`/`issues`/`actions` already are) for the `publish` job's `actions/attest-build-provenance` step, which gives every successfully-published package file a GitHub-signed build provenance attestation, verifiable with `gh attestation verify <file> --repo Akaere-s-Packages/Registry`. Public repos only, unless the org is on GitHub Enterprise Cloud.
 
 ### `pr-preview.yml` — on an open PR: build only, comment the file diff
 
@@ -105,7 +107,7 @@ Organized by pipeline stage. Every script can run standalone outside a workflow 
 | `build/package.sh` | Build one package with makepkg inside `archlinux:base-devel`, extracting the file list and `.PKGINFO` metadata |
 | `publish/repo_lib.sh` | Shared functions (sourced, not run standalone): download/upload the repo db, sign+`repo-add` one package into it, prune old versions. Used by both `minio.sh` and `publish_all.sh` below |
 | `publish/minio.sh` | Publishes exactly one package end-to-end: downloads the db, signs + `repo-add`s this one package, uploads the db back, prunes. `KEEP_VERSIONS` default 1 |
-| `publish/publish_all.sh` | Orchestrates the whole `publish` job for a batch of packages: install `mc`, import the GPG key once, then for every built package sign + `repo-add` it into ONE local db per distro and upload that db exactly once (not once per package — the previous per-package-calls-minio.sh design re-fetched and re-uploaded the same db.tar.gz/.sig/.files on every single successful package, which dominated a multi-package publish job's wall-clock time for no reason), assemble `built_packages.json`. Must run inside `archlinux:base-devel` (`repo-add`/`vercmp` ship with `pacman` itself — nothing to install on a bare Ubuntu runner) |
+| `publish/publish_all.sh` | Orchestrates the whole `publish` job for a batch of packages: install `mc`, import the GPG key once, then for every built package sign + `repo-add` it into ONE local db per distro and upload that db exactly once (not once per package — the previous per-package-calls-minio.sh design re-fetched and re-uploaded the same db.tar.gz/.sig/.files on every single successful package, which dominated a multi-package publish job's wall-clock time for no reason), stage a copy of each published file under `attest-artifacts/` for the workflow's own `actions/attest-build-provenance` step (see below), assemble `built_packages.json` (now including each published file's `filename`/`sha256`). Must run inside `archlinux:base-devel` (`repo-add`/`vercmp` ship with `pacman` itself — nothing to install on a bare Ubuntu runner) |
 | `website/gen_data.py` | Merge Registry + this run's build output + AUR metadata into WebSite-Kit's JSON data |
 | `preview/diff.py` | PR preview: file-level diff of a new build against what's published, as a Markdown comment |
 
