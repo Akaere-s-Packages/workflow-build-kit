@@ -163,6 +163,14 @@ Each wave is its own job (`build-wave-0` through `build-wave-4`), matrixed in pa
 
 `pr-preview.yml` does the same expansion but flattens all layers into one parallel matrix — build order doesn't matter there (nothing depends on `makepkg` running in a particular sequence for a preview build), only "build everything related" does.
 
+### Pacman package cache
+
+Every package builds inside a throwaway `docker run --rm` container (see above), so without help, `pacman -Sy`/makepkg's `--syncdeps` re-downloads the same `base-devel` group and shared dependencies (rust, python, qt, whatever a chunk of the registry happens to need) from scratch on every single build job — real bandwidth and time spent on packages that didn't change. Each build-wave job (and `pr-preview.yml`'s own build job) now bind-mounts a host directory at the container's `/var/cache/pacman/pkg`, restored/saved via `actions/cache/restore`+`actions/cache/save` (split rather than the combined `actions/cache` action so the save step can run — and actually keep whatever got downloaded — even when the build itself failed).
+
+Cache key is `pacman-pkg-cache-<distro>-<run id>` with `pacman-pkg-cache-<distro>-` as the `restore-keys` prefix: every run's save is a genuinely new key (so it never silently no-ops for lack of anything to compare against), while restore always falls back to the best matching prior run regardless of which workflow produced it — `pr-preview.yml` and `build-publish.yml` share the same prefix, so a PR's preview build and the post-merge build-and-publish run for that same change both draw from (and top up) one shared cache instead of each starting cold. Within one run, every matrix leg of every wave races to restore from the same prior key, but only the first leg to *finish* actually saves under this run's key (`actions/cache/save` no-ops rather than erroring on an existing key) — an accepted, imperfect trade-off rather than something requiring per-package cache keys or a synchronizing extra job.
+
+`build-publish.yml` takes an optional `use-cache` input (`type: boolean`, default `true`) gating both the restore and save steps on the build-publish side — set `use-cache: false` for a guaranteed clean-room build (verifying a fix isn't masked by a stale cached package, or just distrusting the cache after something odd). `pr-preview.yml` has no equivalent input: it's triggered automatically on every PR push with no manual form to hang a checkbox off of, so its cache stays unconditionally on.
+
 ### Manual full rebuild
 
 `build-publish.yml` also takes an optional `rebuild-all: true` input, which skips the git-diff-based change detection entirely (`registry/detect_changed_packages.sh --all`) and treats every package in the registry as "changed" — `resolve_build_order.sh` then just lays the whole registry out into build layers instead of an expanded subset. Wire it up as its own manually-triggered workflow:

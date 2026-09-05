@@ -47,6 +47,16 @@ on:
         required: false
         type: string
         default: ""
+      use-cache:
+        description: >-
+          Reuse a pacman package cache across build-wave jobs and runs
+          (speeds up dependency installation inside each build container).
+          Disable for a guaranteed clean-room build — e.g. verifying a fix
+          isn't masked by a stale cached package, or recovering from cache
+          corruption.
+        required: false
+        type: boolean
+        default: true
     secrets:
       R2_ENDPOINT:
         required: true
@@ -234,17 +244,36 @@ jobs:
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        if: inputs.use-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside archlinux:base-devel)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        # always(): a failed build (continue-on-error above) may well have
+        # downloaded new packages before failing — still worth keeping.
+        # actions/cache/save silently no-ops if this exact key was already
+        # saved by another matrix leg earlier in the same run; only the
+        # first leg to finish actually persists this run's cache.
+        if: always() && inputs.use-cache
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -312,17 +341,36 @@ jobs:
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        if: inputs.use-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside archlinux:base-devel)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        # always(): a failed build (continue-on-error above) may well have
+        # downloaded new packages before failing — still worth keeping.
+        # actions/cache/save silently no-ops if this exact key was already
+        # saved by another matrix leg earlier in the same run; only the
+        # first leg to finish actually persists this run's cache.
+        if: always() && inputs.use-cache
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -391,17 +439,36 @@ jobs:
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        if: inputs.use-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside archlinux:base-devel)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        # always(): a failed build (continue-on-error above) may well have
+        # downloaded new packages before failing — still worth keeping.
+        # actions/cache/save silently no-ops if this exact key was already
+        # saved by another matrix leg earlier in the same run; only the
+        # first leg to finish actually persists this run's cache.
+        if: always() && inputs.use-cache
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -470,17 +537,36 @@ jobs:
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        if: inputs.use-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside archlinux:base-devel)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        # always(): a failed build (continue-on-error above) may well have
+        # downloaded new packages before failing — still worth keeping.
+        # actions/cache/save silently no-ops if this exact key was already
+        # saved by another matrix leg earlier in the same run; only the
+        # first leg to finish actually persists this run's cache.
+        if: always() && inputs.use-cache
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()
@@ -548,17 +634,36 @@ jobs:
             echo "pkgbase=$pkgbase"
             echo "aur_depends=$aur_depends"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        if: inputs.use-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside archlinux:base-devel)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        # always(): a failed build (continue-on-error above) may well have
+        # downloaded new packages before failing — still worth keeping.
+        # actions/cache/save silently no-ops if this exact key was already
+        # saved by another matrix leg earlier in the same run; only the
+        # first leg to finish actually persists this run's cache.
+        if: always() && inputs.use-cache
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()

@@ -109,17 +109,38 @@ jobs:
             echo "new_version=$new_version"
             echo "old_version=$old_version"
           } >> "$GITHUB_OUTPUT"
+      - name: restore pacman package cache
+        # Always on here (no manual trigger to hang a disable switch off
+        # of — see build-publish.yml's use-cache input for the equivalent
+        # on the manually-dispatched build paths). The exact key is unique
+        # per run (github.run_id), same as build-publish.yml's, but both
+        # share the same restore-keys prefix — so a PR's preview build
+        # falls back to whatever build-and-publish (or an earlier preview
+        # run) last saved, and vice versa, without either side needing to
+        # know about the other's run.
+        uses: actions/cache/restore@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-cache-${{ matrix.distro }}-
       - name: build (inside distro-specific container)
         id: build
         continue-on-error: true
         run: |
-          mkdir -p out
+          mkdir -p out pkg-cache
           case "${{ matrix.distro }}" in
             archlinux) image="archlinux:base-devel" ;;
             *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
           esac
-          docker run --rm -v "$PWD:/workspace" -w /workspace "$image" \
+          docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: save pacman package cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: pkg-cache
+          key: pacman-pkg-cache-${{ matrix.distro }}-${{ github.run_id }}
       - name: resolve job url
         id: jobinfo
         if: always()
