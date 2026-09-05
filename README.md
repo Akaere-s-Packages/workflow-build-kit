@@ -100,6 +100,13 @@ Merges every ready `bump/*` autoPR (see `check_updates.sh` above) it can find, o
 on:
   workflow_dispatch:
     inputs:
+      source:
+        description: Where to resolve the package from
+        required: true
+        type: choice
+        options:
+          - aur
+        default: aur
       package-name:
         description: Upstream package name to introduce (e.g. an AUR pkgname)
         required: true
@@ -109,10 +116,11 @@ jobs:
     uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/add-package.yml@main
     with:
       package-name: ${{ inputs.package-name }}
+      source-type: ${{ inputs.source }}
     secrets: inherit
 ```
 
-Type in one package name, get back a PR. Resolves the full hard-dependency closure that isn't already installable through the distro's own package manager (via `backends/<distro>/fetch-info.sh` + the new `classify-dep.sh`, see `backends/README.md`) and generates a Registry TOML entry for every package in that closure that isn't already tracked — not just the one requested, so a dependency chain (however deep) comes in as one bundled PR instead of needing N manual runs. Ordering and commit style match `check_updates.sh`: dependencies committed before dependents, `$pkgname: add $pkgver` per commit, one PR on branch `add/<name1>+<name2>+...`.
+Pick a source (a dropdown — just "aur" today, since that's the only backend that exists), type in one package name, get back a PR. Resolves the full hard-dependency closure that isn't already installable through the distro's own package manager (via `backends/<distro>/fetch-info.sh` + the new `classify-dep.sh`, see `backends/README.md`) and generates a Registry TOML entry for every package in that closure that isn't already tracked — not just the one requested, so a dependency chain (however deep) comes in as one bundled PR instead of needing N manual runs. Ordering and commit style match `check_updates.sh`: dependencies committed before dependents, `$pkgname: add $pkgver` per commit, one PR on branch `add/<name1>+<name2>+...`. `source` maps straight onto the reusable workflow's existing `source-type` input (`distro` stays defaulted to `archlinux` and unexposed — there's only one distro backend so far either).
 
 Deliberately conservative compared to `check_updates.sh`'s daily job: if the target branch already has an open PR, this leaves it alone rather than force-pushing over it (an autoPR is expected to be rewritten daily; a manually-triggered add-PR might be mid-review). If the requested package (and everything under it) is already tracked, it's a no-op. If a dependency turns out to be resolvable through *neither* the package manager nor upstream (see `scripts/update/add_package.sh`'s real example below), the run fails loudly rather than silently generating a broken entry.
 
