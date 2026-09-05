@@ -76,7 +76,7 @@ If a group's branch already has an open PR, this doesn't open a second one: it f
 
 This script never merges anything itself — see `merge-queue.yml` below for that.
 
-### `merge-queue.yml` — after pr-preview/build-and-publish: merge one ready autoPR
+### `merge-queue.yml` — after pr-preview/build-and-publish: drain the ready autoPR queue
 
 ```yaml
 # Registry/.github/workflows/merge-queue.yml
@@ -91,7 +91,7 @@ jobs:
     secrets: inherit
 ```
 
-Merges at most one ready `bump/*` autoPR (see `check_updates.sh` above) per invocation, using the same `LILITHYA_PUSH_TOKEN` — no extra secret. "Ready" means both: (1) its own pr-preview build has passed and it's cleanly mergeable, and (2) this repo's Actions are completely idle (nothing else queued or in progress) — so merges never overlap, and a merge's `build-and-publish` run always finishes before the next `bump/*` PR merges. Deletes the head branch as part of the merge. Re-triggers itself on every pr-preview/build-and-publish completion, so the queue drains one PR at a time without a human or a blind poll involved. Needs one one-time repo setting no workflow can set: **Allow rebase merging** under Settings → General (branch protection requiring pr-preview's build check is recommended as defense in depth, but `merge_queue.sh` already verifies checks itself before merging).
+Merges every ready `bump/*` autoPR (see `check_updates.sh` above) it can find, one at a time, in a single invocation — using the same `LILITHYA_PUSH_TOKEN`, no extra secret. "Ready" means both: (1) its own pr-preview build has passed and it's cleanly mergeable, and (2) this repo's Actions are completely idle (nothing else queued or in progress) — so merges never overlap, and a merge's `build-and-publish` run always finishes before the next `bump/*` PR merges. Between merges it polls (not just checks once) until the repo goes idle again, so it actually waits out the build-and-publish run its own merge just triggered rather than giving up at the first busy check. Deletes the head branch as part of each merge. Still re-triggers on every pr-preview/build-and-publish completion as a safety net (queuing behind an already-running drain via its `concurrency` group rather than racing it), but no longer needs that retrigger to advance the queue — a whole backlog of ready PRs clears out in one job run. Needs one one-time repo setting no workflow can set: **Allow rebase merging** under Settings → General (branch protection requiring pr-preview's build check is recommended as defense in depth, but `merge_queue.sh` already verifies checks itself before merging).
 
 ### `add-package.yml` — manual: quick-add one upstream package (+ its dependency closure)
 
@@ -132,7 +132,7 @@ Distro-agnostic orchestration, organized by pipeline stage — nothing here ever
 | `registry/load_registry.sh` | Load every Registry package entry as JSON — used by `resolve_build_order.sh`, `update/check_updates.sh`, and `website/gen_data.sh` |
 | `registry/resolve_build_order.sh` | Expand a changed-package set to everything hard-dependent on it, laid out in up to N dependency-ordered build layers (via `tools/depgraph`) |
 | `update/check_updates.sh` | Find out-of-date autoupdate packages (via each package's own `backends/<distro>/fetch-info.sh`), group dependency-related ones (via `tools/depgraph`), open/force-update `bump/*` PRs (never merges them — see `merge_queue.sh`) |
-| `update/merge_queue.sh` | Merge at most one ready `bump/*` autoPR per run — its own checks green and this repo's Actions idle — so autoPR merges never overlap. Run by `merge-queue.yml`. Not distro-specific at all (pure GitHub PR-queue mechanics) |
+| `update/merge_queue.sh` | Drain every ready `bump/*` autoPR in one run — checks green and this repo's Actions idle before each merge, polling between merges so autoPR merges never overlap. Run by `merge-queue.yml`. Not distro-specific at all (pure GitHub PR-queue mechanics) |
 | `update/add_package.sh` | Quick-add: given one upstream package name, resolves its full dependency closure that isn't already installable through the package manager (via `fetch-info.sh` + `classify-dep.sh`), generates a Registry TOML entry for every new package in the closure, and opens one bundled PR. Run by `add-package.yml` (manual, one name typed in via `workflow_dispatch`) |
 | `build/stage_artifact.sh` | Stage/restore build artifact filenames so they're safe for `actions/upload-artifact` (Windows-forbidden characters percent-encoded) |
 | `publish/repo_lib.sh` | Generic S3 (`mc`) upload primitives (sourced, not run standalone) — download/upload metadata objects, upload one package's file. The repo-INDEX-format-specific half (sign+index one package, prune) is `backends/<distro>/repo_lib.sh`, sourced separately — see `backends/README.md` |

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Drains the autoPR merge queue one PR at a time.
+# Drains the autoPR merge queue: keeps merging ready bump/* PRs, one at a
+# time, until none are left.
 #
 # scripts/update/check_updates.sh (run daily by version-check.yml)
 # opens/updates version-bump PRs on branches named `bump/<name>[+<name>...]`,
@@ -20,13 +21,16 @@ set -uo pipefail
 # Run by merge-queue.yml, itself triggered after every pr-preview or
 # build-and-publish run completes (either one could be what makes a PR newly
 # mergeable, or what frees up the queue) plus workflow_dispatch for manual
-# recovery. Each invocation merges AT MOST one PR — the oldest ready one —
-# and stops; that merge alone triggers a new build-and-publish run, which
-# re-fires merge-queue.yml on completion to consider the next candidate.
-# Nothing here needs to loop or poll: the event-driven retrigger *is* the
-# loop. merge-queue.yml's own concurrency group additionally guarantees only
-# one invocation of this script is ever running at a time, so there's no
-# race between two runs both deciding the repo looks idle.
+# recovery. A single invocation now drains the *whole* queue rather than
+# just the next candidate: merge a ready PR, then poll (not just check once)
+# until the repo goes idle again — which is what waits out the
+# build-and-publish run that merge itself triggers — then look for the next
+# ready PR, and keep going until none are left. The event-driven retrigger
+# on pr-preview/build-and-publish completion still matters as what kicks a
+# drain off (or, if one is already running, queues a rescan behind it via
+# merge-queue.yml's own concurrency group) — it's just no longer relied on
+# to advance the queue one PR at a time, so a whole backlog clears out in
+# one job run instead of one retrigger per PR.
 #
 # Not distro-specific at all — this is pure GitHub PR-queue mechanics, no
 # package-manager tooling involved, so it lives in scripts/update/ (not a
@@ -37,11 +41,23 @@ set -uo pipefail
 # environment (gh CLI reads it itself; never passed as a literal argument).
 #
 # Usage: merge_queue.sh
+#
+# IDLE_POLL_INTERVAL_SECONDS / IDLE_MAX_WAIT_SECONDS (both overridable via
+# env, mainly for tests) control the idle-wait below.
 
 lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 source "$lib_dir/run.sh"
 
 READY_CONCLUSIONS="SUCCESS NEUTRAL SKIPPED"
+
+# How often to re-check while waiting for the repo to go idle, and how long
+# to keep waiting before giving up on this drain (a later retrigger, or the
+# next scheduled/manual run, picks back up from there). An hour is generous
+# for a single build-and-publish run to finish; giving up rather than
+# blocking the job forever keeps a stuck/hung run from pinning this job
+# open indefinitely.
+IDLE_POLL_INTERVAL_SECONDS="${IDLE_POLL_INTERVAL_SECONDS:-30}"
+IDLE_MAX_WAIT_SECONDS="${IDLE_MAX_WAIT_SECONDS:-3600}"
 
 # True if any workflow run other than this queue-drain itself is currently
 # queued or in progress anywhere in the repo. merge-queue runs are excluded
@@ -69,6 +85,24 @@ repo_is_busy() {
   return 1
 }
 
+# Blocks (polling, not a single check) until repo_is_busy reports idle, up
+# to IDLE_MAX_WAIT_SECONDS. Returns 1 if that timeout is hit first, so the
+# caller can stop this drain rather than holding the job open forever —
+# a future retrigger (or the next event) will start a fresh drain.
+wait_for_idle() {
+  local waited=0
+  while repo_is_busy; do
+    if (( waited >= IDLE_MAX_WAIT_SECONDS )); then
+      echo "::warning::repo still busy after ${waited}s (limit ${IDLE_MAX_WAIT_SECONDS}s) — giving up on this drain, a later trigger will pick back up" >&2
+      return 1
+    fi
+    echo "repo busy — waiting ${IDLE_POLL_INTERVAL_SECONDS}s before checking again"
+    sleep "$IDLE_POLL_INTERVAL_SECONDS"
+    waited=$(( waited + IDLE_POLL_INTERVAL_SECONDS ))
+  done
+  return 0
+}
+
 # The oldest open bump/* PR whose own checks have all passed and has no
 # merge conflict. Sets $ready_pr_number (empty string if none qualify yet)
 # rather than echoing it — this function's own debug output (via run(), and
@@ -79,7 +113,13 @@ repo_is_busy() {
 # is skipped (not an error): trying the next-oldest candidate instead of
 # blocking the whole queue behind one slow build keeps a big bundled PR
 # from starving smaller, already-ready ones.
+#
+# $1 (optional): comma-separated PR numbers to skip regardless of their
+# state — used within a single drain to exclude a PR whose merge attempt
+# already failed this run, so main()'s loop doesn't retry (and get stuck
+# on) the same failing PR forever.
 find_ready_pr() {
+  local skip_csv="${1:-}"
   ready_pr_number=""
 
   if ! run gh pr list --state open --json number,headRefName,createdAt --limit 100; then
@@ -94,6 +134,11 @@ find_ready_pr() {
   local number
   while IFS= read -r number; do
     [[ -z "$number" ]] && continue
+
+    if [[ ",${skip_csv}," == *",${number},"* ]]; then
+      echo "PR #$number already failed to merge earlier this run, skipping"
+      continue
+    fi
 
     if ! run gh pr view "$number" --json mergeable,statusCheckRollup; then
       continue
@@ -133,23 +178,31 @@ find_ready_pr() {
 }
 
 main() {
-  if repo_is_busy; then
-    echo "another Actions run is in progress/queued — leaving the queue alone this time"
-    return 0
-  fi
+  local failed_csv=""
 
-  find_ready_pr
-  if [[ -z "$ready_pr_number" ]]; then
-    echo "no bump/* PR is ready to merge right now"
-    return 0
-  fi
+  while true; do
+    if ! wait_for_idle; then
+      return 0
+    fi
 
-  if ! run gh pr merge "$ready_pr_number" --rebase --delete-branch; then
-    echo "::warning::failed to merge PR #$ready_pr_number" >&2
-    return 0
-  fi
-  echo "merged PR #$ready_pr_number, branch deleted"
-  return 0
+    find_ready_pr "$failed_csv"
+    if [[ -z "$ready_pr_number" ]]; then
+      echo "no bump/* PR is ready to merge right now"
+      return 0
+    fi
+
+    if ! run gh pr merge "$ready_pr_number" --rebase --delete-branch; then
+      echo "::warning::failed to merge PR #$ready_pr_number" >&2
+      failed_csv="${failed_csv:+$failed_csv,}$ready_pr_number"
+      continue
+    fi
+    echo "merged PR #$ready_pr_number, branch deleted"
+
+    # Give GitHub a moment to register the build-and-publish run this merge
+    # just triggered, so the next wait_for_idle sees it as busy instead of
+    # racing ahead on stale "idle" state and merging the next PR too soon.
+    sleep "$IDLE_POLL_INTERVAL_SECONDS"
+  done
 }
 
 main
