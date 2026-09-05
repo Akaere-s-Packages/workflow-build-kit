@@ -125,18 +125,26 @@ while (( ${#wave[@]} > 0 )); do
   next_wave=()
   for name in "${to_process[@]}"; do
     version="$(jq -r --arg n "$name" '.[$n].version' "$work_dir/wave_info.json")"
-    # pkgbase isn't in fetch-info.sh's normalized shape (it's a
-    # build-time concept, not something dependency resolution needs) —
-    # falls back to $name, matching how the rest of this project
-    # (load_registry.sh, check_updates.sh) treats pkgbase as "defaults
-    # to name unless told otherwise" at the TOML-authoring layer.
+    # fetch-info.sh reports the real AUR PackageBase (falls back to $name
+    # if a backend doesn't supply one at all — the field is new; an older
+    # or future non-AUR backend might genuinely omit it). This matters:
+    # a split PKGBUILD's non-base pkgname (e.g. rog-control-center, built
+    # from asusctl's PKGBUILD) has its OWN name's AUR git namespace, but
+    # that namespace is an empty placeholder — the real content lives
+    # under the pkgbase's repo, which is what build.sh actually clones.
+    # Silently defaulting pkgbase to name here (the previous behavior)
+    # produced a TOML that looked fine but broke every build with a
+    # useless "cloned an empty repository" / "PKGBUILD does not exist"
+    # failure — caught for real via ttf-ms-win11-auto-zh_cn (pkgbase
+    # ttf-ms-win11-auto), a Microsoft-fonts split package.
+    pkgbase="$(jq -r --arg n "$name" '.[$n].pkgbase // $n' "$work_dir/wave_info.json")"
     aur_deps="$(jq -c -s --arg n "$name" '
       (.[0][$n].depends // []) as $deps | (.[1]) as $c
       | [$deps[] | select($c[.] == "aur")] | unique | sort
     ' "$work_dir/wave_info.json" "$work_dir/wave_classified.json")"
 
-    jq -c --arg n "$name" --arg version "$version" --argjson aur_depends "$aur_deps" \
-      '. + {($n): {version: $version, aur_depends: $aur_depends}}' "$work_dir/resolved.json" > "$work_dir/resolved.json.new"
+    jq -c --arg n "$name" --arg version "$version" --arg pkgbase "$pkgbase" --argjson aur_depends "$aur_deps" \
+      '. + {($n): {version: $version, pkgbase: $pkgbase, aur_depends: $aur_depends}}' "$work_dir/resolved.json" > "$work_dir/resolved.json.new"
     mv "$work_dir/resolved.json.new" "$work_dir/resolved.json"
 
     deps_csv="$(jq -r 'join(",")' <<<"$aur_deps")"
@@ -199,6 +207,7 @@ pr_body+=$'\n'
 failed=false
 for name in "${ordered[@]}"; do
   version="$(jq -r --arg n "$name" '.[$n].version' "$work_dir/resolved.json")"
+  pkgbase="$(jq -r --arg n "$name" '.[$n].pkgbase' "$work_dir/resolved.json")"
   aur_depends_json="$(jq -c --arg n "$name" '.[$n].aur_depends' "$work_dir/resolved.json")"
 
   pkg_dir="$registry_root/$distro/$source_type/$name"
@@ -213,6 +222,10 @@ for name in "${ordered[@]}"; do
   {
     echo "[PACKAGES]"
     echo "name = \"$name\""
+    # Only written when it actually differs from name (matching every
+    # existing hand-authored split-package TOML, e.g. rog-control-center's
+    # pkgbase = "asusctl") — the common case stays a 4-line file.
+    [[ "$pkgbase" != "$name" ]] && echo "pkgbase = \"$pkgbase\""
     echo "version = \"$version\""
     echo "autoupdate = true"
     if [[ "$(jq 'length' <<<"$aur_depends_json")" -gt 0 ]]; then

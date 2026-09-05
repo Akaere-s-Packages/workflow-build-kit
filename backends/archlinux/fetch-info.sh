@@ -19,6 +19,15 @@ set -euo pipefail
 #
 # Prints a JSON object: {"<name>": {
 #   "version": "pkgver-pkgrel",
+#   "pkgbase": str,             # AUR's PackageBase — usually == name, but
+#                                # differs for a non-base pkgname of a
+#                                # split PKGBUILD (e.g. Name
+#                                # "ttf-ms-win11-auto-zh_cn" has PackageBase
+#                                # "ttf-ms-win11-auto"). That name's own AUR
+#                                # git namespace is an empty placeholder —
+#                                # only the pkgbase's repo has real content
+#                                # — so callers that clone/build from this
+#                                # must use pkgbase, never name, for that.
 #   "depends": ["name", ...],   # hard Depends+MakeDepends only (OptDepends
 #                                # is a soft suggestion, not counted), names
 #                                # only (version constraints stripped), NOT
@@ -85,6 +94,7 @@ jq -c '
     key: .Name,
     value: {
       version: .Version,
+      pkgbase: (.PackageBase // .Name),
       depends: ((.Depends // []) + (.MakeDepends // []) | map(strip_constraint) | unique),
       description: (.Description // null),
       url: (.URL // null),

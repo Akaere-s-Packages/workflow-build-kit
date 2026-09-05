@@ -77,7 +77,8 @@ jq -n --argjson names "$names_json" '
     "root-wide": {version: "5.0-1", depends: ["dep-x", "dep-y", "dep-z"]},
     "dep-x": {version: "0.1-1", depends: []},
     "dep-y": {version: "0.2-1", depends: []},
-    "dep-z": {version: "0.3-1", depends: []}
+    "dep-z": {version: "0.3-1", depends: []},
+    "root-split-pkgname": {version: "6.0-1", pkgbase: "root-split-base", depends: []}
   } as $all
   | $names | map(select(. as $n | $all | has($n))) | map({(.): $all[.]}) | add // {}
 '
@@ -315,6 +316,22 @@ test_wide_closure_batches_fetch_info_by_wave() {
   echo "PASS: test_wide_closure_batches_fetch_info_by_wave"
 }
 
+test_split_package_pkgbase_recorded() {
+  local tmp; tmp="$(setup_common)"
+
+  run_add_package "$tmp" root-split-pkgname > "$tmp/output.log" 2>&1 || fail "run failed: $(cat "$tmp/output.log")"
+  grep -q "resolved 1 new package" "$tmp/output.log" || fail "expected 1 new package: $(cat "$tmp/output.log")"
+
+  local branch="add/root-split-pkgname"
+  local toml
+  toml="$(git -C "$tmp/origin.git" show "$branch:testdistro/aur/root-split-pkgname/root-split-pkgname.toml")"
+  [[ "$toml" == *'name = "root-split-pkgname"'* ]] || fail "unexpected toml: $toml"
+  [[ "$toml" == *'pkgbase = "root-split-base"'* ]] || fail "expected pkgbase to be recorded when it differs from name: $toml"
+
+  rm -rf "$tmp"
+  echo "PASS: test_split_package_pkgbase_recorded"
+}
+
 test_simple_no_deps
 test_chained_dependency
 test_already_tracked_root_is_noop
@@ -322,4 +339,5 @@ test_partial_dependency_already_tracked
 test_existing_open_pr_is_left_alone
 test_unresolvable_dependency_errors
 test_wide_closure_batches_fetch_info_by_wave
+test_split_package_pkgbase_recorded
 echo "add_package.sh tests passed"
