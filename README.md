@@ -126,6 +126,33 @@ Deliberately conservative compared to `check_updates.sh`'s daily job: if the tar
 
 Caught a genuine upstream bug the day this was built: asked to add a package whose PKGBUILD `depends` on a since-renamed official package name, the only way to "resolve" it looked like chain-building an orphaned AUR package by the old name — which itself depended on something that exists in neither the official repos nor AUR at all. The run correctly refused to proceed instead of producing a Registry entry that would fail at build time anyway; the actual fix was a one-line PKGBUILD update upstream, not anything in the Registry.
 
+### `remove-package.yml` — manual: drop a tracked package from the Registry
+
+```yaml
+# Registry/.github/workflows/remove-package.yml
+on:
+  workflow_dispatch:
+    inputs:
+      package-name:
+        description: Package name to remove (comma-separate several at once)
+        required: true
+        type: string
+jobs:
+  remove-package:
+    uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/remove-package.yml@main
+    with:
+      package-name: ${{ inputs.package-name }}
+    secrets: inherit
+```
+
+The removal counterpart to `add-package.yml`: type in a tracked package name, get back a PR deleting its `<distro>/<type>/<name>/` directory, one commit per package (`$pkgname: remove $pkgver`), on branch `remove/<name1>+<name2>+...`. No `source`/`distro` dropdown — the package is already in the Registry, so where its manifest lives is looked up, not chosen. Same conservative stance as `add-package.yml`: a branch that already has an open PR is left alone rather than force-pushed over, and a name that isn't tracked at all is a no-op (warned about, not an error — a typo looks exactly like this).
+
+Opening the PR is all it does. Merging is what drops the package from the published repository: `build-publish.yml` already counts deleted manifests and repo-removes them from the shared pacman DB, deletes their files from R2, and regenerates the README table and website data — the same reconciliation `clean.yml` runs on demand.
+
+**Refuses to remove a package another tracked package still hard-depends on**, checking both the Registry's own recorded `aur_depends` and what upstream currently declares (via `fetch-info.sh`) — neither alone is enough, since `aur_depends` is only written when `add_package.sh` generated the entry (most hand-authored manifests don't have it) while upstream data covers everything the backend can actually resolve. This is why the input takes a *list*: a package plus the dependencies that only ever existed to support it is one removal, and naming them all in one run makes the check pass legitimately (dependents inside the removal set don't count) and lands as one atomic PR instead of N with a broken main in between. There's deliberately no `--force` — past that, a hand-written PR deleting the file is the right tool, with human eyes on it.
+
+Two things it reports rather than acts on, both in the run log and the PR body: packages that nothing tracked will depend on anymore once this merges (a leftover chain-build dependency and a package someone actually installs look identical from here), and tracked packages whose dependency data couldn't be established at all — real case, `rog-control-center` is tracked but AUR RPC returns nothing for that name (it's a pkgname from `asusctl`'s split PKGBUILD, only the pkgbase is indexed), so nothing will ever say what it depends on. Aborting on that would make the Registry permanently unremovable; staying quiet would overstate what was checked. Total failure to fetch *any* dependency data is a different matter and does abort the run — `fetch-info.sh` degrading to `{}` on an unreachable upstream must not read as "nothing depends on it".
+
 ## `scripts/`
 
 Distro-agnostic orchestration, organized by pipeline stage — nothing here ever invokes a distro-specific tool directly (see `backends/` below). Every script can run standalone outside a workflow (only depends on standard command-line tools: `bash`/`jq`/`curl`/`git`/`gh`/`gpg`, no extra package dependencies beyond those):
@@ -142,6 +169,7 @@ Distro-agnostic orchestration, organized by pipeline stage — nothing here ever
 | `update/check_updates.sh` | Find out-of-date autoupdate packages (via each package's own `backends/<distro>/fetch-info.sh`), group dependency-related ones (via `tools/depgraph`), open/force-update `bump/*` PRs (never merges them — see `merge_queue.sh`) |
 | `update/merge_queue.sh` | Drain every ready `bump/*` autoPR in one run — checks green and this repo's Actions idle before each merge, polling between merges so autoPR merges never overlap. Run by `merge-queue.yml`. Not distro-specific at all (pure GitHub PR-queue mechanics) |
 | `update/add_package.sh` | Quick-add: given one upstream package name, resolves its full dependency closure that isn't already installable through the package manager (via `fetch-info.sh` + `classify-dep.sh`), generates a Registry TOML entry for every new package in the closure, and opens one bundled PR. Run by `add-package.yml` (manual, one name typed in via `workflow_dispatch`) |
+| `update/remove_package.sh` | Removal counterpart: deletes tracked packages' Registry directories and opens one PR dropping them, dependents committed before their dependencies. Refuses if anything still tracked hard-depends on a target (checking recorded `aur_depends` + upstream `fetch-info.sh`). Run by `remove-package.yml` (manual, `workflow_dispatch`) |
 | `build/stage_artifact.sh` | Stage/restore build artifact filenames so they're safe for `actions/upload-artifact` (Windows-forbidden characters percent-encoded) |
 | `publish/repo_lib.sh` | Generic S3 (`mc`) upload primitives (sourced, not run standalone) — download/upload metadata objects, upload one package's file. The repo-INDEX-format-specific half (sign+index one package, prune) is `backends/<distro>/repo_lib.sh`, sourced separately — see `backends/README.md` |
 | `publish/minio.sh` | Publishes exactly one package end-to-end: downloads the index, signs + indexes this one package, uploads the index back, prunes. `KEEP_VERSIONS` default 1 |

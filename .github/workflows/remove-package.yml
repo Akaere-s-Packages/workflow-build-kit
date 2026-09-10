@@ -1,0 +1,58 @@
+name: remove-package
+
+# Removal counterpart to add-package.yml: given the name(s) of packages
+# already tracked in the Registry, opens one PR deleting their
+# <distro>/<type>/<name>/ directories — see
+# scripts/update/remove_package.sh for the reverse-dependency safety
+# check and commit ordering.
+#
+# Opening the PR is all this does. Merging it is what actually drops the
+# packages from the published repository: build-publish.yml already
+# counts deleted manifests and repo-removes them from the shared pacman
+# DB / deletes their files from R2 (the same reconciliation clean.yml
+# runs on demand), then regenerates the README table and website data.
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: >
+          Name(s) of tracked package(s) to remove. Several may be given
+          at once, separated by commas or spaces — that's how a package
+          plus the dependencies that only existed for it come out in one
+          PR (and the only way past the check that refuses to remove
+          something another tracked package still depends on).
+        required: true
+        type: string
+    secrets:
+      LILITHYA_PUSH_TOKEN:
+        required: true
+
+env:
+  WORKFLOW_BUILD_KIT_REF: main
+
+jobs:
+  remove-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Akaere-s-Packages/workflow-build-kit
+          ref: ${{ env.WORKFLOW_BUILD_KIT_REF }}
+          path: .build-kit
+
+      - name: build depgraph
+        run: make -C .build-kit/tools/depgraph
+
+      - name: check reverse dependencies and open a PR
+        env:
+          GH_TOKEN: ${{ secrets.LILITHYA_PUSH_TOKEN }}
+        run: |
+          git config user.name "Lilithya"
+          git config user.email "me@lilithya.su"
+          bash .build-kit/scripts/update/remove_package.sh \
+            --registry-root . \
+            --package "${{ inputs.package-name }}"
