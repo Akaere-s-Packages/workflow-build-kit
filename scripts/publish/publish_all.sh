@@ -70,11 +70,12 @@ retry() {
   done
 }
 
-retry pacman -Sy --noconfirm --needed curl jq
-
-retry curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
-  https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-chmod +x /usr/local/bin/mc
+# mc comes from Arch's own signed `minio-client` package, not a download
+# from dl.min.io: MinIO archived the open-source client and that URL now
+# answers 410 Gone. Arch ships the binary as `mcli` (`mc` is Midnight
+# Commander's name), so link it to `mc`, which repo_lib.sh calls.
+retry pacman -Sy --noconfirm --needed curl jq minio-client
+ln -sf /usr/bin/mcli /usr/local/bin/mc
 
 # Never trace the decoded private key material itself.
 set +x
