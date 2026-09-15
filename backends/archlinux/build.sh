@@ -70,6 +70,12 @@ chown -R builder:builder "$work_dir"
 
 export PACKAGER="Lilithya <me@lilithya.su>"
 
+# `su - builder` below starts a login shell, which clears root's environment.
+# Pass these explicitly to makepkg so PKGBUILDs invoking make or
+# `cmake --build` use the self-hosted runner's intended build concurrency.
+readonly makeflags="-j20"
+readonly cmake_build_parallel_level=20
+
 build_one() {
   local base="$1"
   local dir="$work_dir/$base"
@@ -122,7 +128,7 @@ build_one() {
   # makepkg also does its own network I/O (downloading the actual
   # upstream sources, plus `-s` pulling any missing sync-repo deps via
   # pacman) — worth the same retry treatment as the clone above.
-  retry su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' makepkg -s --noconfirm --needed $skip_pgp_check"
+  retry su - builder -c "cd '$dir' && PACKAGER='$PACKAGER' MAKEFLAGS='$makeflags' CMAKE_BUILD_PARALLEL_LEVEL='$cmake_build_parallel_level' makepkg -s --noconfirm --needed $skip_pgp_check"
 }
 
 # The file makepkg actually names one pkgname's output as — asked straight

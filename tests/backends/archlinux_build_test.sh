@@ -139,4 +139,25 @@ install_line="$(grep -E '^\s*retry pacman -Sy .*--needed' "$build_sh")"
 [[ -n "$install_line" ]] || fail "couldn't find build.sh's pacman -Sy --needed install line at all"
 echo "$install_line" | grep -qw jq || fail "build.sh uses jq but its own 'pacman -Sy --needed' line doesn't install it: $install_line"
 
+# --- build parallelism: `su -` starts a login shell and therefore drops
+# the root process's environment.  Exercise the real build_one command
+# shape with retry mocked: the makepkg invocation must pass both variables
+# into the builder's login shell. ---
+work_dir="$tmp/parallel-work"
+mkdir -p "$work_dir"
+eval "$(sed -n '/^export PACKAGER=/,/^}/p' "$build_sh")"
+retry() {
+  if [[ "$*" == *"makepkg -s"* ]]; then
+    printf '%s\n' "$*" > "$tmp/makepkg-invocation"
+  fi
+}
+build_one parallel-test
+makepkg_invocation="$(cat "$tmp/makepkg-invocation")"
+[[ "$makepkg_invocation" == *"su - builder -c"* ]] ||
+  fail "makepkg must run in the builder login shell: $makepkg_invocation"
+[[ "$makepkg_invocation" == *"MAKEFLAGS='-j20'"* ]] ||
+  fail "makepkg must receive MAKEFLAGS=-j20: $makepkg_invocation"
+[[ "$makepkg_invocation" == *"CMAKE_BUILD_PARALLEL_LEVEL='20'"* ]] ||
+  fail "makepkg must receive CMAKE_BUILD_PARALLEL_LEVEL=20: $makepkg_invocation"
+
 echo "backends/archlinux/build.sh file_list/build_meta tests passed"
