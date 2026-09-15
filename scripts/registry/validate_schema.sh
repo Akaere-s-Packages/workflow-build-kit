@@ -3,8 +3,8 @@ set -uo pipefail
 
 # Validate Registry package TOML files against the aur/ schema. Distro-
 # agnostic — the schema fields checked here (name/version/autoupdate/
-# enabled/pkgbase/aur_depends/notes) are the generic Registry schema (see
-# Docs/02-registry-schema.md), not anything backend-specific.
+# enabled/pkgbase/aur_depends/notes/self_build) are the generic Registry
+# schema (see Docs/02-registry-schema.md), not anything backend-specific.
 #
 # Meant to run as the first, secret-free step of pr-preview.yml so a
 # malformed toml fails fast before any build is attempted.
@@ -93,6 +93,10 @@ validate_one() {
   if jq -e 'has("enabled")' <<<"$fields_json" >/dev/null; then
     [[ "$(jq -r '.enabled | type' <<<"$fields_json")" == "boolean" ]] \
       || errors+=("${raw_path}: 'enabled' must be a bool")
+  fi
+  if jq -e 'has("self_build")' <<<"$fields_json" >/dev/null; then
+    [[ "$(jq -r '.self_build | type' <<<"$fields_json")" == "boolean" ]] \
+      || errors+=("${raw_path}: 'self_build' must be a bool")
   fi
 
   if jq -e 'has("pkgbase")' <<<"$fields_json" >/dev/null; then

@@ -66,13 +66,24 @@ jobs:
           echo "resolved packages:"; cat layers.json
           # Bare assignment so a genuine jq failure trips `set -e` instead
           # of silently writing an empty list to $GITHUB_OUTPUT.
-          packages=$(jq -c 'add' layers.json)
+          # `self_build` manifests route to the self-hosted runner (heavy
+          # builds exceed GitHub-hosted runners' hard 360-minute ceiling);
+          # `runner` feeds the build job's `runs-on`, `timeout` its
+          # `timeout-minutes`. Fork PRs are forced back onto
+          # GitHub-hosted runners: a PKGBUILD is arbitrary code, and a
+          # fork's preview build has no business running on our own
+          # hardware, docker sandbox or not.
+          fork_guard="$(if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then echo true; else echo false; fi)"
+          packages=$(jq -c --argjson fork "$fork_guard" 'add | map(. + {
+            runner: (if .self_build and ($fork | not) then "self-hosted" else "ubuntu-latest" end),
+            timeout: (if .self_build and ($fork | not) then 1440 else 360 end)})' layers.json)
           echo "packages=$packages" >> "$GITHUB_OUTPUT"
 
   build:
     needs: detect-and-validate
     if: needs.detect-and-validate.outputs.packages != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -135,6 +146,24 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        # The build container runs as root, so everything it wrote (out/,
+        # pkg-cache/ — pacman even makes its download dirs 0700) is
+        # root-owned on the host: the cache save below can't read it
+        # ("Permission denied"), and on a self-hosted runner the workspace
+        # isn't wiped between runs, so root-owned leftovers would also
+        # break the next run's checkout. Hand it all back to the runner
+        # user. if: always() since a failed build may still have written
+        # files the cache save wants to keep.
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         if: always()
         uses: actions/cache/save@v4

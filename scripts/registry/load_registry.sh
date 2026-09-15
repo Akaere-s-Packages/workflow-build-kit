@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage: load_registry.sh --registry-root <path>
 #
 # Prints a JSON array of:
-#   {distro,type,name,pkgbase,version,autoupdate,enabled,toml_path}
+#   {distro,type,name,pkgbase,version,autoupdate,enabled,self_build,toml_path}
 # toml_path is absolute, so callers can both re-derive the path relative to
 # registry-root (for output shapes that want it) and read/edit the file
 # directly without needing registry-root passed around separately.
@@ -65,14 +65,20 @@ for toml_path in "${toml_paths[@]:-}"; do
   # false` (jq's `//` treats JSON false as falsy too — see toml.sh's
   # toml_get for the same trap).
   enabled="$(jq -r 'if has("enabled") then .enabled else true end' <<<"$fields_json")"
+  # `self_build` defaults to false when absent — same has() pattern as
+  # `enabled` above (jq's `//` would swallow a legit `self_build = false`).
+  # Routes the package's CI build to a self-hosted runner instead of a
+  # GitHub-hosted one (see the wave/build jobs' `runs-on` expressions).
+  self_build="$(jq -r 'if has("self_build") then .self_build else false end' <<<"$fields_json")"
 
   entry="$(jq -n \
     --arg distro "$distro" --arg type "$source_type" --arg name "$name" \
     --arg pkgbase "$pkgbase" --arg version "$version" \
     --argjson autoupdate "$autoupdate" --argjson enabled "$enabled" \
+    --argjson self_build "$self_build" \
     --arg toml_path "$toml_path" \
     '{distro:$distro,type:$type,name:$name,pkgbase:$pkgbase,version:$version,
-      autoupdate:$autoupdate,enabled:$enabled,toml_path:$toml_path}')"
+      autoupdate:$autoupdate,enabled:$enabled,self_build:$self_build,toml_path:$toml_path}')"
   entries="$(jq -c --argjson e "$entry" '. + [$e]' <<<"$entries")"
 done
 

@@ -137,14 +137,15 @@ if ! "$depgraph" layers --subset "$build_set_file" --max-layers "$max_layers" < 
   exit 1
 fi
 
-# Map each layer's bare names back to the full {distro,type,name,path}
-# shape detect_changed_packages.sh uses, path relative to registry-root,
-# then pad to exactly --max-layers entries (with empty layers) so the
-# calling workflow can index layers[0]/[1]/[2] unconditionally.
+# Map each layer's bare names back to the full {distro,type,name,path,
+# self_build} shape (path relative to registry-root) the calling workflows
+# matrix over — `self_build` lets them route heavy builds to a self-hosted
+# runner — then pad to exactly --max-layers entries (with empty layers) so
+# the calling workflow can index layers[0]/[1]/[2] unconditionally.
 jq -c --argjson n "$max_layers" --arg root "$registry_root_abs/" -s '
   .[0] as $layers | .[1] as $entries
   | ($entries | map({(.name): {distro:.distro, type:.type, name:.name,
-      path: (.toml_path | ltrimstr($root)) }}) | add) as $by_name
+      path: (.toml_path | ltrimstr($root)), self_build: (.self_build // false)}}) | add) as $by_name
   | ($layers | map([.[] | $by_name[.]])) as $result
   | $result + ([range($n - ($result | length))] | map([]))
 ' <(cat "$work_dir/layers.json") <(jq -c '.' "$work_dir/entries.json")

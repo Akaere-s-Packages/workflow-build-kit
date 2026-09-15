@@ -189,14 +189,24 @@ jobs:
           bash .build-kit/scripts/registry/resolve_build_order.sh \
             --registry-root . --changed changed.json --max-layers 5 > layers.json
           echo "resolved build layers:"; cat layers.json
+          # Route packages whose manifest sets `self_build = true` onto the
+          # self-hosted runner (heavy builds like linux-mainline blow past
+          # GitHub-hosted runners' hard 360-minute job ceiling even when
+          # the build itself succeeds); everything else stays on
+          # ubuntu-latest. `runner` feeds each wave job's `runs-on`,
+          # `timeout` its `timeout-minutes` — self-hosted jobs get a full
+          # day since the 360-minute ceiling doesn't apply there.
+          routed=$(jq -c 'map(map(. + {
+            runner: (if .self_build then "self-hosted" else "ubuntu-latest" end),
+            timeout: (if .self_build then 1440 else 360 end)}))' layers.json)
           # Bare assignments (not `echo "x=$(...)"`) so a genuine jq
           # failure trips `set -e` instead of silently writing an empty
           # layer to $GITHUB_OUTPUT.
-          layer0=$(jq -c '.[0]' layers.json)
-          layer1=$(jq -c '.[1]' layers.json)
-          layer2=$(jq -c '.[2]' layers.json)
-          layer3=$(jq -c '.[3]' layers.json)
-          layer4=$(jq -c '.[4]' layers.json)
+          layer0=$(jq -c '.[0]' <<<"$routed")
+          layer1=$(jq -c '.[1]' <<<"$routed")
+          layer2=$(jq -c '.[2]' <<<"$routed")
+          layer3=$(jq -c '.[3]' <<<"$routed")
+          layer4=$(jq -c '.[4]' <<<"$routed")
           {
             echo "layer0=$layer0"
             echo "layer1=$layer1"
@@ -208,7 +218,8 @@ jobs:
   build-wave-0:
     needs: detect-changes
     if: needs.detect-changes.outputs.layer0 != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     # Deliberately NOT `container: archlinux:base-devel` at the job level:
     # actions/checkout needs a real `git` binary, and the base-devel group
     # doesn't include one, so checkout would fail before package.sh ever
@@ -263,6 +274,24 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        # The build container runs as root, so everything it wrote (out/,
+        # pkg-cache/ — pacman even makes its download dirs 0700) is
+        # root-owned on the host: the cache save below can't read it
+        # ("Permission denied"), and on a self-hosted runner the workspace
+        # isn't wiped between runs, so root-owned leftovers would also
+        # break the next run's checkout. Hand it all back to the runner
+        # user. if: always() since a failed build may still have written
+        # files the cache save wants to keep.
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         # always(): a failed build (continue-on-error above) may well have
         # downloaded new packages before failing — still worth keeping.
@@ -312,7 +341,8 @@ jobs:
     # behavior — build-wave-0 is legitimately skipped whenever layer0 is
     # empty, and that must not skip this wave too.
     if: always() && needs.detect-changes.outputs.layer1 != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -360,6 +390,17 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          # See build-wave-0 for why this step exists.
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         # always(): a failed build (continue-on-error above) may well have
         # downloaded new packages before failing — still worth keeping.
@@ -410,7 +451,8 @@ jobs:
     # whether either was skipped.
     needs: [detect-changes, build-wave-1]
     if: always() && needs.detect-changes.outputs.layer2 != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -458,6 +500,17 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          # See build-wave-0 for why this step exists.
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         # always(): a failed build (continue-on-error above) may well have
         # downloaded new packages before failing — still worth keeping.
@@ -508,7 +561,8 @@ jobs:
     # earlier waves regardless of whether any of them were skipped.
     needs: [detect-changes, build-wave-2]
     if: always() && needs.detect-changes.outputs.layer3 != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -556,6 +610,17 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          # See build-wave-0 for why this step exists.
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         # always(): a failed build (continue-on-error above) may well have
         # downloaded new packages before failing — still worth keeping.
@@ -605,7 +670,8 @@ jobs:
     # before it.
     needs: [detect-changes, build-wave-3]
     if: always() && needs.detect-changes.outputs.layer4 != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -653,6 +719,17 @@ jobs:
           esac
           docker run --rm -v "$PWD:/workspace" -v "$PWD/pkg-cache:/var/cache/pacman/pkg" -w /workspace "$image" \
             bash "build-kit/backends/${{ matrix.distro }}/build.sh" "${{ matrix.name }}" "${{ steps.meta.outputs.pkgbase }}" out ${{ steps.meta.outputs.aur_depends }}
+      - name: fix container file ownership
+        if: always()
+        run: |
+          mkdir -p out pkg-cache
+          case "${{ matrix.distro }}" in
+            archlinux) image="archlinux:base-devel" ;;
+            *) echo "::error::no build container configured for distro '${{ matrix.distro }}'" >&2; exit 1 ;;
+          esac
+          # See build-wave-0 for why this step exists.
+          docker run --rm -v "$PWD:/workspace" "$image" \
+            chown -R "$(id -u):$(id -g)" /workspace/out /workspace/pkg-cache
       - name: save pacman package cache
         # always(): a failed build (continue-on-error above) may well have
         # downloaded new packages before failing — still worth keeping.
