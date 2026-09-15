@@ -288,6 +288,24 @@ for (( i = 0; i < entry_count; i++ )); do
   fi
 done
 
+# --- drop detail files for packages no longer tracked: the loop above
+# only ever writes/merges <name>.json for current entries, and the
+# website passthrough-copies the whole packageDetails/ directory to
+# /packageDetails/ and /data/packageDetails/, so without this a removed
+# package's JSON stays published (and committed) forever. ---
+jq -r '.[].name' "$work_dir/entries.json" | LC_ALL=C sort -u > "$work_dir/tracked.txt"
+pruned=0
+for detail_file in "$details_dir"/*.json; do
+  [[ -e "$detail_file" ]] || break
+  detail_name="$(basename "$detail_file" .json)"
+  if ! grep -qxF "$detail_name" "$work_dir/tracked.txt"; then
+    echo "pruning stale packageDetails/$detail_name.json (no longer in Registry)"
+    rm -f "$detail_file"
+    pruned=$((pruned + 1))
+  fi
+done
+(( pruned == 0 )) || echo "::notice::pruned $pruned stale packageDetails file(s)"
+
 jq -cs 'sort_by(.name)' "$packages_summary_file" | jq '.' > "$website_data_dir/packages.json"
 
 jq -cs 'sort_by(.date) | reverse | .[0:20]' "$updates_file" | jq '.' > "$website_data_dir/updates.json"
