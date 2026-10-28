@@ -1,0 +1,129 @@
+name: nix-cache
+
+# Called by Registry on a daily cron (and on pushes touching nix/). Builds
+# every packages.x86_64-linux attribute of Registry's nix/ flake, pushes
+# their runtime closures to the akaere Cachix cache, then commits the
+# refreshed nix/flake.lock.
+#
+# The lock commit is what makes the cache useful: a flake package's store
+# path depends on the exact upstream rev and its own locked inputs, so a
+# consumer only hits the cache when it evaluates the same lock. Consumers
+# therefore follow Registry's inputs (`inputs.omp.follows = "akaere/omp"`)
+# instead of tracking upstream directly. The lock only advances after
+# every package built and was pushed — a failed run leaves consumers on
+# the previous, fully cached lock. A scheduled run whose refreshed lock is
+# identical to the committed one stops right after the update: everything
+# it pins is already cached.
+#
+# Nothing here touches the pacman pipeline: the nix/ flake lives outside
+# the `<distro>/<type>/<name>/<name>.toml` glob every other workflow and
+# script keys on.
+
+on:
+  workflow_call:
+    inputs:
+      update-inputs:
+        description: >-
+          Run `nix flake update` before building (the scheduled refresh).
+          Disable to build exactly what nix/flake.lock already pins (an
+          input newly added to nix/flake.nix still gets locked).
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CACHIX_CACHE: akaere
+  FLAKE_DIR: nix
+  NIX_SYSTEM: x86_64-linux
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Two runs racing would each commit their own flake.lock; queue instead.
+    concurrency:
+      group: akaere-nix-cache
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          # Authenticated GitHub API access for resolving github: inputs.
+          github_access_token: ${{ github.token }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Pushed explicitly below instead: only the packages' runtime
+          # closures (not every build-time intermediate), and only once the
+          # whole set built, strictly before the lock commit.
+          skipPush: true
+
+      - name: update flake inputs
+        id: update
+        if: inputs.update-inputs
+        run: |
+          nix flake update --flake "./$FLAKE_DIR"
+          if git diff --quiet -- "$FLAKE_DIR/flake.lock"; then
+            echo "no upstream changes since the committed lock; nothing to build"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: build packages
+        if: steps.update.outputs.changed != 'false'
+        run: |
+          mapfile -t attrs < <(nix eval --json "./$FLAKE_DIR#packages.$NIX_SYSTEM" --apply builtins.attrNames | jq -r '.[]')
+          if (( ${#attrs[@]} == 0 )); then
+            echo "::error::$FLAKE_DIR/flake.nix exposes no packages.$NIX_SYSTEM"
+            exit 1
+          fi
+          installables=()
+          for attr in "${attrs[@]}"; do
+            installables+=("./$FLAKE_DIR#packages.$NIX_SYSTEM.\"$attr\"")
+          done
+          nix build --no-link --keep-going --print-build-logs --print-out-paths "${installables[@]}" > out-paths
+          cat out-paths
+
+      - name: push to Cachix
+        if: steps.update.outputs.changed != 'false'
+        run: cachix push "$CACHIX_CACHE" < out-paths
+
+      - name: summary
+        if: steps.update.outputs.changed != 'false'
+        run: |
+          {
+            echo "### Cached in \`$CACHIX_CACHE\`"
+            echo
+            echo "| Input | Locked rev |"
+            echo "|---|---|"
+            nix flake metadata --json "./$FLAKE_DIR" | jq -r '
+              .locks as $l
+              | $l.nodes[$l.root].inputs | to_entries[] | select(.value | type == "string")
+              | "| \(.key) | `\($l.nodes[.value].locked.rev // $l.nodes[.value].locked.narHash)` |"'
+            echo
+            echo '```'
+            cat out-paths
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: commit nix/flake.lock with the default token (does not retrigger this workflow)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FLAKE_DIR/flake.lock"
+          if git diff --cached --quiet; then
+            echo "$FLAKE_DIR/flake.lock unchanged"
+            exit 0
+          fi
+          git commit -m "chore(nix): update flake.lock"
+          # A multi-hour build easily outlives main's HEAD (README/bump
+          # commits); nothing else ever writes nix/flake.lock, so rebasing
+          # onto whatever landed meanwhile can't conflict.
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"

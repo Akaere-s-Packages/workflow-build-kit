@@ -153,6 +153,31 @@ Opening the PR is all it does. Merging is what drops the package from the publis
 
 Two things it reports rather than acts on, both in the run log and the PR body: packages that nothing tracked will depend on anymore once this merges (a leftover chain-build dependency and a package someone actually installs look identical from here), and tracked packages whose dependency data couldn't be established at all — real case, `rog-control-center` is tracked but AUR RPC returns nothing for that name (it's a pkgname from `asusctl`'s split PKGBUILD, only the pkgbase is indexed), so nothing will ever say what it depends on. Aborting on that would make the Registry permanently unremovable; staying quiet would overstate what was checked. Total failure to fetch *any* dependency data is a different matter and does abort the run — `fetch-info.sh` degrading to `{}` on an unreachable upstream must not read as "nothing depends on it".
 
+### `nix-cache.yml` — daily: build Registry's Nix flake into Cachix
+
+```yaml
+# Registry/.github/workflows/nix-cache.yml
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  push:
+    branches: [main]
+    paths: ["nix/**"]
+  workflow_dispatch: {}
+jobs:
+  nix-cache:
+    permissions:
+      contents: write
+    uses: Akaere-s-Packages/workflow-build-kit/.github/workflows/nix-cache.yml@main
+    with:
+      update-inputs: ${{ github.event_name != 'push' }}
+    secrets: inherit
+```
+
+Requires `CACHIX_AUTH_TOKEN` (write access to the `akaere` Cachix cache). Separate from the pacman pipeline entirely: Registry's `nix/flake.nix` re-exports upstream flake packages and sits outside the `*/*/*/*.toml` glob every other script keys on.
+
+With `update-inputs: true` (the daily run) it runs `nix flake update` on `nix/`; if the refreshed lock equals the committed one, everything is already cached and the run stops there. Otherwise it builds every `packages.x86_64-linux` attribute (`--keep-going`, so one log shows every failure), `cachix push`es their runtime closures — not build-time intermediates, which would only burn cache quota — and then commits `nix/flake.lock` with the default token (`git pull --rebase` first, since a long build outlives main's HEAD). The ordering is the point: a flake package's store path is a function of the exact upstream rev plus upstream's own lock, so consumers only hit the cache by following Registry's inputs (`inputs.omp.follows = "akaere/omp"`), and the lock only ever advances to a state whose every package is already in the cache. Any build failure fails the run before the push and leaves the previous lock in place. With `update-inputs: false` (pushes touching `nix/`) it builds what the lock pins, locking only newly added inputs. Runs are serialized through a `concurrency` group so two lock commits never race.
+
 ## `scripts/`
 
 Distro-agnostic orchestration, organized by pipeline stage — nothing here ever invokes a distro-specific tool directly (see `backends/` below). Every script can run standalone outside a workflow (only depends on standard command-line tools: `bash`/`jq`/`curl`/`git`/`gh`/`gpg`, no extra package dependencies beyond those):
