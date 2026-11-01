@@ -119,7 +119,9 @@ MC
     cp "$repo_root/scripts/publish/repo_lib.sh" build-kit/scripts/publish/
     cp "$repo_root/backends/archlinux/repo_lib.sh" build-kit/backends/archlinux/
     sed -n '/^repo_name=/,$p' "$repo_root/scripts/publish/publish_all.sh" > batch_only.sh
-    bash batch_only.sh > run.log 2>&1
+    # Same shell options as publish_all.sh's own header (cut off above), so
+    # a failure that aborts the real run also aborts here.
+    bash -euo pipefail batch_only.sh > run.log 2>&1
   )
 }
 
@@ -134,6 +136,10 @@ test_batch_success() {
   make_registry_entry "$tmp" pkgb
   make_registry_entry "$tmp" pkgc
   make_registry_entry "$tmp" pkgd
+  # A top-level Registry dir with no backends/<dir>/repo_lib.sh (Registry's
+  # nix/ flake) isn't a repo distro and must be skipped, not sourced.
+  mkdir -p "$tmp/registry/nix"
+  touch "$tmp/registry/nix/flake.nix"
   mkdir -p "$tmp/bin"
 
   run_batch "$tmp" ok

@@ -135,11 +135,16 @@ done
 # distro's db still needs reconciling below. (A distro whose very last
 # package is removed in one push has no directory left here to discover at
 # all; out of scope for now — there's exactly one distro today and
-# emptying it entirely in one push isn't a realistic case yet.)
+# emptying it entirely in one push isn't a realistic case yet.) Only
+# directories with a backends/<distro>/repo_lib.sh are repo distros: others
+# (e.g. registry/nix/, a flake published by nix-cache.yml) aren't published
+# through this script at all.
 distros=()
 for d in registry/*/; do
   [[ -d "$d" ]] || continue
-  distros+=("$(basename "$d")")
+  distro="$(basename "$d")"
+  [[ -f "build-kit/backends/$distro/repo_lib.sh" ]] || continue
+  distros+=("$distro")
 done
 
 bucket="${R2_BUCKET:?R2_BUCKET required}"
