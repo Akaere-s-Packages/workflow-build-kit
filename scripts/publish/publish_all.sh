@@ -74,7 +74,11 @@ retry() {
 # from dl.min.io: MinIO archived the open-source client and that URL now
 # answers 410 Gone. Arch ships the binary as `mcli` (`mc` is Midnight
 # Commander's name), so link it to `mc`, which repo_lib.sh calls.
-retry pacman -Sy --noconfirm --needed curl jq minio-client
+# -Syu, not -Sy: refreshing the sync db without upgrading is a partial
+# upgrade. Once the repo moves past the image's libraries (openssl 4.x vs
+# the image's libcrypto.so=3), --needed still upgrades curl and pacman then
+# refuses the transaction ("installing openssl ... breaks dependency").
+retry pacman -Syu --noconfirm --needed curl jq minio-client
 ln -sf /usr/bin/mcli /usr/local/bin/mc
 
 # Never trace the decoded private key material itself.

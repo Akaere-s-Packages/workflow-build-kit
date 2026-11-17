@@ -60,7 +60,12 @@ retry() {
 # pipes through it. A real CI run caught this the first time: "jq:
 # command not found" at the bsdtar|awk|jq step, since the old Python
 # heredocs this replaced never needed it installed explicitly.
-retry pacman -Sy --noconfirm --needed git jq
+#
+# -Syu, not -Sy: a bare -Sy is a partial upgrade — anything installed from
+# the fresh sync db here or by makepkg --syncdeps can need libraries newer
+# than the image ships (e.g. openssl 4.x vs the image's libcrypto.so=3),
+# and pacman then refuses the transaction.
+retry pacman -Syu --noconfirm --needed git jq
 
 if ! id builder &>/dev/null; then
   useradd -m builder
